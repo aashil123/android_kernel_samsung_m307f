@@ -122,5 +122,10 @@ extern void decon_abd_save_bit(struct abd_protect *abd, unsigned int size, unsig
 extern void decon_abd_pin_enable(struct decon_device *decon, int enable);
 extern int decon_abd_pin_register_handler(int irq, irq_handler_t handler, void *dev_id);
 extern int decon_abd_con_register(struct decon_device *decon);
+#if defined(CONFIG_LOGGING_BIGDATA_BUG)
+extern void log_decon_bigdata(struct decon_device *decon);
+#else
+static inline void log_decon_bigdata(struct decon_device *decon) {};
+#endif
 #endif
 

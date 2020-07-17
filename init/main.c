@@ -107,6 +107,11 @@
 #include <linux/rkp.h>
 #endif
 
+#ifdef CONFIG_SECURITY_DEFEX
+#include <linux/defex.h>
+void __init __weak defex_load_rules(void) { }
+#endif
+
 static int kernel_init(void *);
 
 extern void init_IRQ(void);
@@ -593,10 +598,18 @@ static void __init rkp_robuffer_init(void)
 #ifdef CONFIG_RKP_KDP
 #define VERITY_PARAM_LENGTH 20
 static char verifiedbootstate[VERITY_PARAM_LENGTH];
+int __check_verifiedboot __kdp_ro = 0;
+#ifdef CONFIG_SAMSUNG_PRODUCT_SHIP
+extern int ss_initialized __kdp_ro;
+#endif
+
 static int __init verifiedboot_state_setup(char *str)
 {
 	strlcpy(verifiedbootstate, str, sizeof(verifiedbootstate));
-	return 1;
+
+	if(!strncmp(verifiedbootstate, "orange", sizeof("orange")))
+		__check_verifiedboot = 1;
+	return 0;
 }
 __setup("androidboot.verifiedbootstate=", verifiedboot_state_setup);
 
@@ -627,7 +640,10 @@ void kdp_init(void)
 	cred.bp_cred_secptr 	= rkp_get_offset_bp_cred();
 
 	cred.verifiedbootstate = (u64)verifiedbootstate;
-	uh_call(UH_APP_RKP, 0x40, (u64)&cred, 0, 0, 0);
+#ifdef CONFIG_SAMSUNG_PRODUCT_SHIP
+	cred.selinux.ss_initialized_va	= (u64)&ss_initialized;
+#endif
+	uh_call(UH_APP_RKP, RKP_KDP_X40, (u64)&cred, 0, 0, 0);
 }
 #endif /*CONFIG_RKP_KDP*/
 
@@ -675,7 +691,9 @@ asmlinkage __visible void __init start_kernel(void)
 	build_all_zonelists(NULL);
 	page_alloc_init();
 
+#if !defined(CONFIG_SAMSUNG_PRODUCT_SHIP)
 	pr_notice("Kernel command line: %s\n", boot_command_line);
+#endif
 	parse_early_param();
 	after_dashes = parse_args("Booting kernel",
 				  static_command_line, __start___param,
@@ -1298,4 +1316,7 @@ static noinline void __init kernel_init_freeable(void)
 
 	integrity_load_keys();
 	load_default_modules();
+#ifdef CONFIG_SECURITY_DEFEX
+	defex_load_rules();
+#endif
 }

@@ -46,15 +46,13 @@ void sm5713_select_pdo(int num)
 	psubpd->phy_ops.get_short_state(psubpd, &vbus_short);
 
 	if (vbus_short) {
-		pr_info(" %s : PDO(%d) is ignored becasue of vbus short\n",
-				__func__, pd_noti.sink_status.selected_pdo_num);
+		pr_info(" %s : PDO(%d) is ignored becasue of vbus short\n", __func__, num);
 		return;
 	}
 
-	if (manager->fled_torch_enable || manager->fled_flash_enable) {
+	if (num > 1 && (manager->fled_torch_enable || manager->fled_flash_enable)) {
 		pr_info(" %s : PDO(%d) is ignored becasue of [torch(%d) or flash(%d)]\n",
-				__func__, pd_noti.sink_status.selected_pdo_num,
-				manager->fled_torch_enable, manager->fled_flash_enable);
+			__func__, num, manager->fled_torch_enable, manager->fled_flash_enable);
 		return;
 	}
 
@@ -1082,7 +1080,6 @@ int sm5713_usbpd_evaluate_capability(struct sm5713_usbpd_data *pd_data)
 	PDIC_SINK_STATUS *pdic_sink_status = &pd_noti.sink_status;
 #endif
 	data_obj_type *pd_obj;
-	bool vbus_short = false;
 
 	for (i = 0; i < policy->rx_msg_header.num_data_objs; i++) {
 		pd_obj = &policy->rx_data_obj[i];
@@ -1120,8 +1117,7 @@ int sm5713_usbpd_evaluate_capability(struct sm5713_usbpd_data *pd_data)
 		}
 	}
 
-	pd_data->phy_ops.get_short_state(pd_data, &vbus_short);
-	if (vbus_short) {
+	if (pdic_sink_status->rp_currentlvl == RP_CURRENT_ABNORMAL) {
 		available_pdo_num = 1;
 		pdic_sink_status->power_list[1].max_current =
 			pdic_sink_status->power_list[1].max_current > 1800 ?

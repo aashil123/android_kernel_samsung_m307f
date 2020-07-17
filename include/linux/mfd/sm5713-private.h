@@ -219,6 +219,7 @@ enum sm5713_fuelgauge_reg {
     SM5713_FG_REG_AUX_2             = 0x93,
     SM5713_FG_REG_AUX_3             = 0x94,
     SM5713_FG_REG_AUX_STAT          = 0x95,
+    SM5713_FG_REG_BAT_PTT1          = 0x96,
     SM5713_FG_REG_V_ALARM_HYS       = 0x99,
     SM5713_FG_REG_AGING_CTRL        = 0x9C,
 

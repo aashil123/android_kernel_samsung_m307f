@@ -764,17 +764,17 @@ static DEVICE_ATTR(uart_en, 0664, sm5713_muic_show_uart_en,
 static DEVICE_ATTR(uart_sel, 0664, sm5713_muic_show_uart_sel,
 					sm5713_muic_set_uart_sel);
 #endif
-static DEVICE_ATTR(adc, 0664, sm5713_muic_show_adc, NULL);
+static DEVICE_ATTR(adc, 0444, sm5713_muic_show_adc, NULL);
 #ifdef DEBUG_MUIC
-static DEVICE_ATTR(mansw, 0664, sm5713_muic_show_mansw, NULL);
-static DEVICE_ATTR(dump_registers, 0664, sm5713_muic_show_registers, NULL);
+static DEVICE_ATTR(mansw, 0444, sm5713_muic_show_mansw, NULL);
+static DEVICE_ATTR(dump_registers, 0444, sm5713_muic_show_registers, NULL);
 #endif
-static DEVICE_ATTR(usb_state, 0664, sm5713_muic_show_usb_state, NULL);
+static DEVICE_ATTR(usb_state, 0444, sm5713_muic_show_usb_state, NULL);
 #if defined(CONFIG_USB_HOST_NOTIFY)
 static DEVICE_ATTR(otg_test, 0664,
 		sm5713_muic_show_otg_test, sm5713_muic_set_otg_test);
 #endif
-static DEVICE_ATTR(attached_dev, 0664, sm5713_muic_show_attached_dev, NULL);
+static DEVICE_ATTR(attached_dev, 0444, sm5713_muic_show_attached_dev, NULL);
 static DEVICE_ATTR(audio_path, 0664,
 		sm5713_muic_show_audio_path, sm5713_muic_set_audio_path);
 static DEVICE_ATTR(apo_factory, 0664,
@@ -1406,6 +1406,14 @@ static void sm5713_muic_handle_detach(struct sm5713_muic_data *muic_data,
 	int ret = 0;
 	bool noti = true;
 
+	muic_data->hv_voltage = 0;
+
+	if (muic_data->is_water_detect) {
+		pr_info("[%s:%s] skipped by water detected condition\n",
+				MUIC_DEV_NAME, __func__);
+		return;
+	}
+
 	pr_info("[%s:%s] attached_dev:%d\n", MUIC_DEV_NAME, __func__,
 			muic_data->attached_dev);
 
@@ -1748,11 +1756,8 @@ static int sm5713_muic_reg_init(struct sm5713_muic_data *muic_data)
 
 	/* set dcd timer out to 0.8s */
 	cntl &= ~CTRL_DCDTIMER_MASK;
-#ifdef CONFIG_MUIC_SM5713_BC1_2_CERTI
-	cntl |= (CTRL_DCDTIMER_MASK & 0x01);
-#else
 	cntl |= (CTRL_DCDTIMER_MASK & 0x10);
-#endif
+
 	sm5713_i2c_write_byte(i2c, SM5713_MUIC_REG_CNTL, cntl);
 
 	pr_info("[%s:%s] intmask1:0x%x, intmask2:0x%x, cntl:0x%x, mansw:0x%x\n",
@@ -2233,6 +2238,7 @@ static int sm5713_muic_probe(struct platform_device *pdev)
 	muic_data->fled_torch_enable = false;
 	muic_data->fled_flash_enable = false;
 	muic_data->old_afctxd = 0x00;
+	muic_data->hv_voltage = 0;
 
 #if defined(CONFIG_HICCUP_CHARGER)
 	muic_data->is_hiccup_mode = false;

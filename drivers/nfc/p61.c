@@ -51,7 +51,7 @@
 extern long  pn547_dev_ioctl(struct file *filp, unsigned int cmd,
 	unsigned long arg);
 
-#define P61_SPI_CLOCK     8000000L
+#define P61_SPI_CLOCK     7000000L
 
 /* size of maximum read/write buffer supported by driver */
 #define MAX_BUFFER_SIZE   258U
@@ -119,6 +119,10 @@ struct p61_device {
 	struct wake_lock ese_lock;
 	bool device_opened;
 
+	struct pinctrl *pinctrl;
+	struct pinctrl_state *ese_on_pin;
+	struct pinctrl_state *ese_off_pin;
+
 #ifdef CONFIG_ESE_SECURE
 	struct clk *ese_spi_pclk;
 	struct clk *ese_spi_sclk;
@@ -131,33 +135,6 @@ static struct p61_device *p61_dev;
 
 /* T==1 protocol specific global data */
 const unsigned char SOF = 0xA5u;
-
-/* Qcom Factory spi immediate pinctrl */
-int ese_spi_pinctrl(int enable)
-{
-	int ret = 0;
-//#ifndef CONFIG_ESE_SECURE temp
-	pr_info("%s [%d]\n", __func__, enable);
-#if 0 //temp
-	switch (enable) {
-	case 0:
-		ret = ese_spi_free_gpios(p61_dev->spi);
-		if (ret < 0)
-			pr_err("%s: couldn't config spi gpio\n", __func__);
-		break;
-	case 1:
-		ret = ese_spi_request_gpios(p61_dev->spi);
-		if (ret < 0)
-			pr_err("%s: couldn't config spi gpio\n", __func__);
-		break;
-	default:
-		pr_err("%s no matching!\n", __func__);
-		ret = -EINVAL;
-	}
-#endif
-	return ret;
-}
-EXPORT_SYMBOL_GPL(ese_spi_pinctrl);
 
 #ifdef CONFIG_ESE_SECURE
 /**
@@ -226,7 +203,7 @@ static void p61_spi_clock_set(struct p61_device *p61_dev, unsigned long speed)
 		/*pr_info("%s speed:%lu\n", __func__, speed);*/
 	} else if (!strcmp(p61_dev->ap_vendor, "slsi")) {
 		/* There is half-multiplier */
-		speed =  speed * 2;
+		speed =  speed * 4;
 	}
 
 	clk_set_rate(p61_dev->ese_spi_sclk, speed);
@@ -243,11 +220,12 @@ static int p61_clk_control(struct p61_device *p61_dev, bool onoff)
 	}
 
 	if (onoff == true) {
-		p61_spi_clock_set(p61_dev, P61_SPI_CLOCK);
+		/* For slsi AP, clk enable should be run before clk set */
 		clk_prepare_enable(p61_dev->ese_spi_pclk);
 		clk_prepare_enable(p61_dev->ese_spi_sclk);
+		p61_spi_clock_set(p61_dev, P61_SPI_CLOCK);
 		usleep_range(5000, 5100);
-		pr_info("%s: clock:%lu\n", __func__,
+		P61_INFO_MSG("%s: clock: %lu(%lu)\n", __func__, P61_SPI_CLOCK,
 			clk_get_rate(p61_dev->ese_spi_sclk));
 	} else {
 		clk_disable_unprepare(p61_dev->ese_spi_pclk);
@@ -323,6 +301,48 @@ int tz_tee_ese_secure_check(void)
 	return	tz_tee_ese_drv(SECURE_CHECK);
 }
 #endif
+
+int ese_spi_pinctrl(int enable)
+{
+	int ret = 0;
+
+	pr_info("[p61] %s (%d)\n", __func__, enable);
+
+	switch (enable) {
+	case 0:
+#ifdef CONFIG_ESE_SECURE
+		p61_clk_control(p61_dev, false);
+		tz_tee_ese_drv(PM_SUSPEND);
+#else
+		if (p61_dev->ese_off_pin) {
+			if (pinctrl_select_state(p61_dev->pinctrl, p61_dev->ese_off_pin))
+				P61_INFO_MSG("ese off pinctrl set error\n");
+			else
+				P61_INFO_MSG("ese off pinctrl set\n");
+		}
+#endif		
+		break;
+	case 1:
+#ifdef CONFIG_ESE_SECURE
+		p61_clk_control(p61_dev, true);
+		tz_tee_ese_drv(PM_RESUME);
+#else
+		if (p61_dev->ese_on_pin) {
+			if (pinctrl_select_state(p61_dev->pinctrl, p61_dev->ese_on_pin))
+				P61_INFO_MSG("ese on pinctrl set error\n");
+			else
+				P61_INFO_MSG("ese on pinctrl set\n");
+		}
+#endif
+		break;
+	default:
+		pr_err("%s no matching!\n", __func__);
+		ret = -EINVAL;
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(ese_spi_pinctrl);
 
 static int p61_xfer(struct p61_device *p61_dev,
 			struct p61_ioctl_transfer *tr)
@@ -451,11 +471,6 @@ static int p61_dev_open(struct inode *inode, struct file *filp)
 		wake_lock(&p61_dev->ese_lock);
 	}
 
-#ifdef CONFIG_ESE_SECURE
-	p61_clk_control(p61_dev, true);
-	tz_tee_ese_drv(PM_RESUME);
-#endif
-
 	p61_dev->device_opened = true;
 
 	return 0;
@@ -571,12 +586,6 @@ static int p61_dev_release(struct inode *inode, struct file *file)
 	struct p61_device *p61_dev = file->private_data;
 
 	pr_info("[ESE]: %s\n", __func__);
-
-#ifdef CONFIG_ESE_SECURE
-	p61_clk_control(p61_dev, false);
-	tz_tee_ese_drv(PM_SUSPEND);
-	usleep_range(1000, 1500);
-#endif
 
 	if (wake_lock_active(&p61_dev->ese_lock)) {
 		pr_info("%s: [NFC-ESE] wake unlock.\n", __func__);
@@ -816,7 +825,6 @@ static int p61_parse_dt(struct device *dev,
 	struct device_node *np = dev->of_node;
 	struct device_node *spi_device_node;
 	struct platform_device *spi_pdev;
-	struct pinctrl *isdbt_pinctrl;
 
 	if (!of_property_read_string(np, "p61-ap_vendor",
 		&p61_dev->ap_vendor)) {
@@ -826,13 +834,16 @@ static int p61_parse_dt(struct device *dev,
 	spi_device_node = of_parse_phandle(np, "p61-spi_node", 0);
 	if (!IS_ERR_OR_NULL(spi_device_node)) {
 		spi_pdev = of_find_device_by_node(spi_device_node);
+#ifndef CONFIG_ESE_SECURE
+		p61_dev->pinctrl = devm_pinctrl_get(&spi_pdev->dev);
 
-		isdbt_pinctrl = devm_pinctrl_get_select(&spi_pdev->dev, "sleep");
-
-		if (IS_ERR(isdbt_pinctrl))
-			pr_info("spi pin configuration is failed\n");
+		p61_dev->ese_on_pin = pinctrl_lookup_state(p61_dev->pinctrl, "ese_on");
+		p61_dev->ese_off_pin = pinctrl_lookup_state(p61_dev->pinctrl, "ese_off");
+		if (pinctrl_select_state(p61_dev->pinctrl, p61_dev->ese_off_pin))
+			P61_INFO_MSG("ese off pinctrl set error\n");
 		else
-			pr_info("spi pin configuration is success\n");
+			P61_INFO_MSG("ese off pinctrl set\n");
+#endif
 	} else {
 		pr_info("target does not use spi pinctrl\n");
 	}

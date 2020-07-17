@@ -15,6 +15,7 @@
 #include "fimc-is-cis.h"
 
 #define EXT_CLK_Mhz (26)
+#define SENSOR_IMX582_240FPS_FRAME_DURATION_US    (4166)
 
 #define SENSOR_IMX582_MAX_WIDTH          (8000 + 0)
 #define SENSOR_IMX582_MAX_HEIGHT         (6000 + 0)

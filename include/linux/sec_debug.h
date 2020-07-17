@@ -74,6 +74,7 @@ enum sec_debug_reset_reason_t {
 	RR_B = 8,
 	RR_N = 9,
 	RR_T = 10,
+	RR_C = 11,
 };
 
 extern unsigned reset_reason;
@@ -206,8 +207,11 @@ struct sec_debug_spinlock_info {
 
 struct ess_info_offset {
 	char key[SD_ESSINFO_KEY_SIZE];
-	unsigned long offset;
+	unsigned long base;
+	unsigned long last;
 	unsigned int nr;
+	unsigned int size;
+	unsigned int per_core;
 };
 
 struct sec_debug_ess_info {
@@ -266,6 +270,7 @@ struct sec_debug_kernel_data {
 	uint64_t dev_shutdown_end;
 	uint64_t dev_shutdown_duration;
 	uint64_t dev_shutdown_func;
+	uint64_t sysrq_ptr;
 	struct watchdogd_info wddinfo;
 	struct bad_stack_info bsi;
 	struct suspend_dev_info sdi;
@@ -305,12 +310,13 @@ struct sec_debug_map {
 #define SEC_DEBUG_MAGIC1	(0x12121313)
 
 enum {
-	DSS_KEVENT_PA,
-	DSS_TASK_OFF,
-	DSS_WORK_OFF,
-	DSS_IRQ_OFF,
-	DSS_FREQ_OFF,
-	DSS_IDLE_OFF,
+	DSS_KEVENT_TASK,
+	DSS_KEVENT_WORK,
+	DSS_KEVENT_IRQ,
+	DSS_KEVENT_FREQ,
+	DSS_KEVENT_IDLE,
+	DSS_KEVENT_THRM,
+	DSS_KEVENT_ACPM,
 };
 
 extern unsigned int get_smpl_warn_number(void);
@@ -328,7 +334,8 @@ extern unsigned int sec_debug_get_kevent_paddr(int type);
 
 extern char *get_bk_item_val(const char *key);
 extern void get_bk_item_val_as_string(const char *key, char *buf);
-extern void sec_debug_get_kevent_info(int type, unsigned long *paddr, unsigned int *nr);
+extern void sec_debug_get_kevent_info(struct ess_info_offset *p, int type);
+extern unsigned long sec_debug_get_kevent_index_addr(int type);
 
 extern void sec_debug_set_task_in_pm_suspend(uint64_t task);
 extern void sec_debug_set_task_in_sys_reboot(uint64_t task);
@@ -621,18 +628,26 @@ static inline void sec_debug_pcprwsem_log_print(const char *s, int mode, void *s
 #endif
 
 #ifdef CONFIG_SEC_DEBUG_DTASK
-extern void sec_debug_set_wait_data(int type, void *data);
+extern void sec_debug_wtsk_print_info(struct task_struct *task, bool raw);
+extern void sec_debug_wtsk_set_data(int type, void *data);
 #else
-#define sec_debug_set_wait_data(a, b)		do { } while (0)
+#define sec_debug_wtsk_print_info(a, b)		do { } while (0)
+#define sec_debug_wtsk_set_data(a, b)		do { } while (0)
 #endif
 
 #ifdef CONFIG_SEC_DEBUG_INIT_LOG
 extern void register_init_log_hook_func(void (*func)(const char *buf, size_t size));
 #endif
 
+/* increase if sec_debug_next is not changed and other feature is upgraded */
+#define SEC_DEBUG_KERNEL_UPPER_VERSION		(0x0001)
+/* increase if sec_debug_next is changed */
+#define SEC_DEBUG_KERNEL_LOWER_VERSION		(0x0001)
+
 /* SEC DEBUG NEXT DEFINITION */
 struct sec_debug_next {
 	unsigned int magic[2];
+	unsigned int version[2];
 
 	struct sec_debug_map map;
 	struct sec_debug_ksyms ksyms;
@@ -641,7 +656,6 @@ struct sec_debug_next {
 	struct sec_debug_ess_info ss_info;
 	struct sec_debug_spinlock_info rlock;
 	struct sec_debug_kernel_data kernd;
-	size_t sysrq_ptr;
 
 	struct sec_debug_auto_comment auto_comment;
 	struct sec_debug_shared_buffer extra_info;

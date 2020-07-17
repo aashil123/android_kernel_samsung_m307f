@@ -578,13 +578,13 @@ int set_usb_whitelist_array(const char *buf, int *whitelist_array)
 	while ((ptr = strsep(&source, ":")) != NULL) {
 		pr_info("%s token = %c%c%c!\n", __func__,
 			ptr[0], ptr[1], ptr[2]);
-		for (i = 1; i <= USB_CLASS_VENDOR_SPEC; i++) {
-			if (!strncmp(ptr, interface_class_name[i-1], 3))
+		for (i = U_CLASS_PER_INTERFACE; i <= U_CLASS_VENDOR_SPEC; i++) {
+			if (!strncmp(ptr, interface_class_name[i], 3))
 				whitelist_array[i] = 1;
 		}
 	}
 
-	for (i = 1; i <= U_CLASS_VENDOR_SPEC; i++) {
+	for (i = U_CLASS_PER_INTERFACE; i <= U_CLASS_VENDOR_SPEC; i++) {
 		if (whitelist_array[i])
 			valid_class_count++;
 	}

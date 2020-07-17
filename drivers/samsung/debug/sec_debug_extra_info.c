@@ -29,6 +29,8 @@
 
 #include "sec_debug_extra_info_keys.c"
 
+static bool exin_ready;
+
 static struct sec_debug_shared_buffer *sh_buf;
 static void *slot_end_addr;
 
@@ -104,8 +106,8 @@ static void *search_item_by_key(const char *key, int start, int end)
 	char *keyname;
 	unsigned int max;
 
-	if (!sh_buf) {
-		pr_info("%s: extra_info is not ready\n");
+	if (!sh_buf || !exin_ready) {
+		pr_info("%s: (%s) extra_info is not ready\n", __func__, key);
 
 		return NULL;
 	}
@@ -391,6 +393,11 @@ static void dump_slot(int type, void *ptr)
 	else
 		m = NULL;
 
+	if (!exin_ready) {
+		pr_crit("%s: EXIN is not ready\n", __func__);
+		return;
+	}
+
 	/* temporally for backup slot */
 	cnt = sh_buf->sec_debug_sbidx[type].cnt;
 
@@ -422,6 +429,12 @@ static void dump_all_keys(void)
 	void *p;
 	int s, i;
 	unsigned int cnt;
+
+	if (!exin_ready) {
+		pr_crit("%s: EXIN is not ready\n", __func__);
+
+		return;
+	}
 
 	for (s = 0; s < NR_SLOT; s++) {
 		cnt = sh_buf->sec_debug_sbidx[s].cnt;
@@ -1190,6 +1203,11 @@ static const struct file_operations sec_debug_reset_extra_info_proc_fops = {
 
 void simulate_extra_info_force_error(unsigned int magic)
 {
+	if (!exin_ready) {
+		pr_crit("%s: EXIN is not ready\n", __func__);
+		return;
+	}
+
 	sh_buf->magic[0] = magic;
 }
 
@@ -1206,6 +1224,8 @@ static int __init sec_debug_extra_info_init(void)
 		sh_buf->magic[2] = SEC_DEBUG_SHARED_MAGIC2;
 		sh_buf->magic[3] = SEC_DEBUG_SHARED_MAGIC3;
 	}
+
+	exin_ready = true;
 
 	entry = proc_create("reset_reason_extra_info",
 			    0644, NULL, &sec_debug_reset_extra_info_proc_fops);

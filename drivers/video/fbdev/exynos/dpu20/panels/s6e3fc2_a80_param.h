@@ -63,31 +63,31 @@ enum {
 	LDI_BIT_ENUM_MAX
 };
 
-char *LDI_BIT_DESC_05[BITS_PER_BYTE] = {
+static char *LDI_BIT_DESC_05[BITS_PER_BYTE] = {
 	[0 ... 6] = "number of corrupted packets",
 	[7] = "overflow on number of corrupted packets",
 };
 
-char *LDI_BIT_DESC_0A[BITS_PER_BYTE] = {
+static char *LDI_BIT_DESC_0A[BITS_PER_BYTE] = {
 	[2] = "Display is Off",
 	[7] = "Booster has a fault",
 };
 
-char *LDI_BIT_DESC_0E[BITS_PER_BYTE] = {
+static char *LDI_BIT_DESC_0E[BITS_PER_BYTE] = {
 	[0] = "Error on DSI",
 };
 
-char *LDI_BIT_DESC_0F[BITS_PER_BYTE] = {
+static char *LDI_BIT_DESC_0F[BITS_PER_BYTE] = {
 	[7] = "Register Loading Detection",
 };
 
-char *LDI_BIT_DESC_EE[BITS_PER_BYTE] = {
+static char *LDI_BIT_DESC_EE[BITS_PER_BYTE] = {
 	[2] = "VLIN3 error",
 	[3] = "ELVDD error",
 	[6] = "VLIN1 error",
 };
 
-struct bit_info ldi_bit_info_list[LDI_BIT_ENUM_MAX] = {
+static struct bit_info ldi_bit_info_list[LDI_BIT_ENUM_MAX] = {
 	[LDI_BIT_ENUM_05] = {0x05, 1, LDI_BIT_DESC_05, 0x00, },
 	[LDI_BIT_ENUM_0A] = {0x0A, 1, LDI_BIT_DESC_0A, 0x9C, .invert = (BIT(2) | BIT(7)), },
 	[LDI_BIT_ENUM_0E] = {0x0E, 1, LDI_BIT_DESC_0E, 0x80, },
@@ -189,12 +189,17 @@ static unsigned char SEQ_ELVSS_SET[] = {
 
 static unsigned char SEQ_HBM_ON[] = {
 	0x53,
-	0xE0,
+	0xE8,
 };
 
 static unsigned char SEQ_HBM_OFF[] = {
 	0x53,
 	0x28,
+};
+
+static unsigned char SEQ_HBM_ON_DIMMING_OFF[] = {
+	0x53,
+	0xE0,
 };
 
 static unsigned char SEQ_HBM_OFF_DIMMING_OFF[] = {
@@ -225,6 +230,26 @@ enum {
 	ALPM_ON_HIGH,	/* ALPM 60 NIT */
 	HLPM_ON_HIGH,	/* HLPM 60 NIT */
 	ALPM_MODE_MAX
+};
+
+enum {
+	AOD_MODE_OFF,
+	AOD_MODE_ALPM,
+	AOD_MODE_HLPM,
+	AOD_MODE_MAX
+};
+
+static unsigned int lpm_old_table[ALPM_MODE_MAX] = {
+	ALPM_OFF,
+	HLPM_ON_LOW,
+	HLPM_ON_LOW,
+	ALPM_ON_HIGH,
+	HLPM_ON_HIGH,
+};
+
+static unsigned int lpm_brightness_table[EXTEND_BRIGHTNESS + 1] = {
+	[0 ... 93]			= HLPM_ON_LOW,
+	[94 ... EXTEND_BRIGHTNESS]	= HLPM_ON_HIGH,
 };
 
 static unsigned char SEQ_HLPM_ON_02[] = {
@@ -312,7 +337,7 @@ enum {
 };
 
 static unsigned char *HBM_TABLE[TRANS_DIMMING_MAX][HBM_STATUS_MAX] = {
-	{SEQ_HBM_OFF_DIMMING_OFF, SEQ_HBM_ON},
+	{SEQ_HBM_OFF_DIMMING_OFF, SEQ_HBM_ON_DIMMING_OFF},
 	{SEQ_HBM_OFF, SEQ_HBM_ON}
 };
 
@@ -382,113 +407,5 @@ static unsigned int elvss_table[EXTEND_BRIGHTNESS + 1] = {
 	[350 ... EXTEND_BRIGHTNESS - 1] = 0x91,
 	[EXTEND_BRIGHTNESS] = 0x90,
 };
-
-#ifdef CONFIG_LCD_HMT
-#define DEFAULT_HMT_BRIGHTNESS			162
-
-static unsigned int hmt_brightness_table[EXTEND_BRIGHTNESS + 1] = {
-	[0 ... 3] = 268,
-	[4 ... 8] = 278,
-	[9 ... 12] = 288,
-	[13 ... 17] = 298,
-	[18 ... 21] = 308,
-	[22 ... 25] = 318,
-	[26 ... 30] = 328,
-	[31 ... 34] = 338,
-	[35 ... 39] = 348,
-	[40 ... 43] = 358,
-	[44 ... 47] = 368,
-	[48 ... 52] = 378,
-	[53 ... 56] = 388,
-	[57 ... 61] = 398,
-	[62 ... 65] = 408,
-	[66 ... 69] = 418,
-	[70 ... 74] = 428,
-	[74 ... 78] = 438,
-	[79 ... 83] = 448,
-	[84 ... 87] = 458,
-	[88 ... 91] = 468,
-	[92 ... 96] = 478,
-	[97 ... 100] = 488,
-	[101 ... 105] = 498,
-	[106 ... 119] = 508,
-	[110 ... 113] = 518,
-	[114 ... 118] = 528,
-	[119 ... 122] = 538,
-	[123 ... 127] = 548,
-	[128 ... 131] = 558,
-	[132 ... 135] = 568,
-	[136 ... 140] = 578,
-	[141 ... 144] = 588,
-	[145 ... 148] = 598,
-	[149 ... 153] = 608,
-	[154 ... 157] = 618,
-	[158 ... 162] = 628,
-	[163 ... 166] = 638,
-	[167 ... 170] = 648,
-	[171 ... 175] = 658,
-	[176 ... 179] = 668,
-	[180 ... 184] = 678,
-	[185 ... 188] = 688,
-	[189 ... 192] = 698,
-	[193 ... 197] = 708,
-	[198 ... 201] = 718,
-	[202 ... 206] = 728,
-	[207 ... 210] = 738,
-	[211 ... 214] = 748,
-	[215 ... 219] = 758,
-	[220 ... 223] = 768,
-	[224 ... 228] = 778,
-	[229 ... 232] = 788,
-	[233 ... 236] = 798,
-	[237 ... 241] = 808,
-	[242 ... 245] = 818,
-	[246 ... 250] = 828,
-	[251 ... 254] = 838,
-	[255 ... EXTEND_BRIGHTNESS] = 848,
-};
-/* when get OP code will modify */
-static unsigned char SEQ_GPARA_HMT_5F[] = {
-	0xB0,
-	0x5F
-};
-
-static unsigned char SEQ_HMT_AOR_80[] = {
-	0xB9,
-	0x01, 0xD8
-};
-
-static unsigned char SEQ_HMT_AOR_00[] = {
-	0xB9,
-	0x00, 0x14
-};
-
-static unsigned char SEQ_HMT_AID_ON[] = {
-	0xC0,
-	0x31, 0x01, 0x03, 0x00, 0x0E, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x00, 0x00,
-	0x40, 0x3F, 0x00, 0x53, 0x00, 0x00, 0x00, 0x20, 0x06, 0x22,
-	0x31, 0x4B, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0xE0, 0x0B,
-	0x77, 0xD8, 0x00, 0x00, 0x00, 0x00, 0xFC, 0x00, 0x00, 0x00,
-	0xF6, 0x97, 0x06, 0x65, 0xE1, 0xCB, 0x0C, 0x2D, 0x8D, 0xED,
-	0xED, 0xED, 0xED, 0x8D
-};
-
-static unsigned char SEQ_HMT_AID_OFF[] = {
-	0xC0,
-	0x31, 0x01, 0x0B, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x00, 0x00,
-	0x40, 0x3F, 0x00, 0x53, 0x00, 0x00, 0x00, 0x20, 0x06, 0x22,
-	0x31, 0x4B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE0, 0x0B,
-	0x77, 0xD8, 0x00, 0x00, 0x00, 0x00, 0xFC, 0x00, 0x00, 0x00,
-	0xF6, 0x97, 0x06, 0x65, 0xE1, 0xCB, 0x0C, 0x2D, 0x8D, 0xED,
-	0xED, 0xED, 0xED, 0x0D,
-};
-
-static unsigned char SEQ_HMT_LTPS[] = {
-	0xC0,
-	0x31
-};
-#endif
 
 #endif /* __S6E3FC2_PARAM_H__ */

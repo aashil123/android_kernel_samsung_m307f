@@ -887,8 +887,7 @@ struct decon_device {
 
 	unsigned int ignore_vsync;
 	struct abd_protect abd;
-	atomic_t win_config;
-	atomic_t displayoff;
+	atomic_t ffu_flag;	/* first frame update */
 
 #if defined(CONFIG_SUPPORT_MASK_LAYER)
 	bool current_mask_layer;
@@ -1198,19 +1197,6 @@ static inline bool decon_min_lock_cond(struct decon_device *decon)
 	return (atomic_read(&decon->hiber.block_cnt) <= 0);
 }
 
-#ifdef CONFIG_LCD_HMT
-static inline bool is_hmd_running(struct decon_device *decon)
-{
-	struct dsim_device *dsim;
-	dsim = container_of(decon->out_sd[0], struct dsim_device, sd);
-
-	if (dsim != NULL && dsim->hmt_on)
-		return true;
-	else
-		return false;
-}
-#endif
-
 static inline bool is_cam_not_running(struct decon_device *decon)
 {
 	if (!decon->id)
@@ -1224,9 +1210,6 @@ static inline bool decon_hiber_enter_cond(struct decon_device *decon)
 		&& is_cam_not_running(decon)
 #if defined(CONFIG_EXYNOS_DISPLAYPORT)
 		&& is_displayport_not_running()
-#endif
-#ifdef CONFIG_LCD_HMT
-		&& (!is_hmd_running(decon))
 #endif
 		&& (!decon->low_persistence)
 		&& (atomic_inc_return(&decon->hiber.trig_cnt) >

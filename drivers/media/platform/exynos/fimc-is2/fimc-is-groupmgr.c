@@ -618,6 +618,9 @@ void fimc_is_group_subdev_cancel(struct fimc_is_group *group,
 #endif
 				}
 			} while (sub_frame && flush);
+			
+			if (sub_vctx->video->try_smp)
+				up(&sub_vctx->video->smp_multi_input);
 		}
 
 		group = group->child;
@@ -2255,9 +2258,9 @@ int fimc_is_group_stop(struct fimc_is_groupmgr *groupmgr,
 
 	device = group->device;
 	head = group->head;
+	gtask = &groupmgr->gtask[head->id];
 	sensor = device->sensor;
 	framemgr = GET_HEAD_GROUP_FRAMEMGR(group);
-	gtask = &groupmgr->gtask[head->id];
 	if (!framemgr) {
 		mgerr("framemgr is NULL", group, group);
 		goto p_err;

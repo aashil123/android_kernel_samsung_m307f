@@ -22,6 +22,8 @@
 #include <asm/stacktrace.h>
 
 unsigned int reset_reason = RR_N;
+#define PWRSRC_RS_SIZE	16
+static char pwrsrc_rs[PWRSRC_RS_SIZE + 1];
 
 static const char *regs_bit[][8] = {
 	{ "RSVD0", "TSD", "TIMEOUT", "LDO3OK", "PWRHOLD", "RSVD5", "RSVD6", "UVLOB" }, /* PWROFFSRC */
@@ -83,6 +85,17 @@ static int __init sec_debug_set_reset_reason(char *arg)
 
 early_param("sec_debug.reset_reason", sec_debug_set_reset_reason);
 
+static int __init secdbg_set_pwrsrc_rs(char *arg)
+{
+	if (strlen(arg) > PWRSRC_RS_SIZE)
+		return 0;
+
+	memcpy(pwrsrc_rs, arg, (int)strlen(arg));
+	return 0;
+}
+
+early_param("sec_debug.pwrsrc_rs", secdbg_set_pwrsrc_rs);
+
 static int set_debug_reset_reason_proc_show(struct seq_file *m, void *v)
 {
 	if (reset_reason == RR_S)
@@ -103,6 +116,8 @@ static int set_debug_reset_reason_proc_show(struct seq_file *m, void *v)
 		seq_puts(m, "BPON\n");
 	else if (reset_reason == RR_T)
 		seq_puts(m, "TPON\n");
+	else if (reset_reason == RR_C)
+		seq_puts(m, "CPON\n");
 	else
 		seq_puts(m, "NPON\n");
 
@@ -154,6 +169,49 @@ static const struct file_operations sec_debug_reset_reason_store_lastkmsg_proc_f
 	.release = single_release,
 };
 
+static void parse_pwrsrc_rs(struct outbuf *buf)
+{
+	int i;
+	unsigned long tmp;
+	long long_pwrsrc_rs;
+
+	kstrtol(pwrsrc_rs, 16, &long_pwrsrc_rs);
+
+	write_buf(buf, 0, "OFFSRC::");
+	tmp = long_pwrsrc_rs & 0xff0000000000;
+	tmp >>= 40;
+	if (!tmp)
+		write_buf(buf, 0, " -");
+	else 
+		for(i = 0; i < 8; i++)
+			if (tmp & (1 << i))
+				write_buf(buf, 0, " %s", regs_bit[0][i]);
+	write_buf(buf, 0, " /");
+
+	write_buf(buf, 0, " ONSRC::");
+	tmp = long_pwrsrc_rs & 0x00ff00000000;
+	tmp >>= 32;
+	if (!tmp)
+		write_buf(buf, 0, " -");
+	else
+		for(i = 0; i < 8; i++)
+			if (tmp & (1 << i))
+				write_buf(buf, 0, " %s", regs_bit[1][i]);
+
+	write_buf(buf, 0, " /");
+
+	write_buf(buf, 0, " RSTSTAT::");
+	tmp = long_pwrsrc_rs & 0x0000ffffffff;
+	if (!tmp)
+		write_buf(buf, 0, " -");
+	else
+		for (i = 0; i < 32; i++)
+			if (tmp & (1 << i))
+				write_buf(buf, 0, " %s", dword_regs_bit[0][i]);
+
+	buf->already = 1;
+}
+
 /*
  * proc/pwrsrc
  * OFFSRC (from PWROFF - 32) + ONSRC (from PWR - 32) + RSTSTAT (from RST - 32)
@@ -165,6 +223,7 @@ static int sec_debug_reset_reason_pwrsrc_show(struct seq_file *m, void *v)
 	int i;
 	char val[32] = {0, };
 	unsigned long tmp;
+	int check_tmp = 0;
 
 	if (pwrsrc_buf.already)
 		goto out;
@@ -176,9 +235,10 @@ static int sec_debug_reset_reason_pwrsrc_show(struct seq_file *m, void *v)
 	tmp = simple_strtol(val, NULL, 0);
 
 	write_buf(&pwrsrc_buf, 0, "OFFSRC:");
-	if (!tmp)
+	if (!tmp) {
 		write_buf(&pwrsrc_buf, 0, " -");
-	else
+		check_tmp++;
+	} else
 		for (i = 0; i < 8; i++)
 			if (tmp & (1 << i))
 				write_buf(&pwrsrc_buf, 0, " %s", regs_bit[0][i]);
@@ -190,9 +250,10 @@ static int sec_debug_reset_reason_pwrsrc_show(struct seq_file *m, void *v)
 	tmp = simple_strtol(val, NULL, 0);
 
 	write_buf(&pwrsrc_buf, 0, " ONSRC:");
-	if (!tmp)
+	if (!tmp) {
 		write_buf(&pwrsrc_buf, 0, " -");
-	else
+		check_tmp++;
+	} else
 		for (i = 0; i < 8; i++)
 			if (tmp & (1 << i))
 				write_buf(&pwrsrc_buf, 0, " %s", regs_bit[1][i]);
@@ -204,12 +265,18 @@ static int sec_debug_reset_reason_pwrsrc_show(struct seq_file *m, void *v)
 	tmp = simple_strtol(val, NULL, 0);
 
 	write_buf(&pwrsrc_buf, 0, " RSTSTAT:");
-	if (!tmp)
+	if (!tmp) {
 		write_buf(&pwrsrc_buf, 0, " -");
-	else
+		check_tmp++;
+	} else
 		for (i = 0; i < 32; i++)
 			if (tmp & (1 << i))
 				write_buf(&pwrsrc_buf, 0, " %s", dword_regs_bit[0][i]);
+
+	if (check_tmp == 3) {
+		memset(&pwrsrc_buf, 0, sizeof(pwrsrc_buf));
+		parse_pwrsrc_rs(&pwrsrc_buf);
+	}
 
 	pwrsrc_buf.already = 1;
 out:

@@ -956,6 +956,12 @@ static void wq_func_subdev(struct fimc_is_subdev *leader,
 
 	clear_bit(subdev->id, &ldr_frame->out_flag);
 
+	/* For supporting multi input to single output */
+	if (subdev->vctx->video->try_smp) {
+		subdev->vctx->video->try_smp = false;
+		up(&subdev->vctx->video->smp_multi_input);
+	}
+
 	/* Skip done when current frame is doing stripe_process. */
 	if (!status && sub_frame->state == FS_STRIPE_PROCESS)
 		return;

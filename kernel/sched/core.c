@@ -5249,6 +5249,7 @@ void sched_show_task(struct task_struct *p)
 		(unsigned long)task_thread_info(p)->flags);
 
 	print_worker_info(KERN_INFO, p);
+	sec_debug_wtsk_print_info(p, false);
 	show_stack(p, NULL);
 	put_task_stack(p);
 }

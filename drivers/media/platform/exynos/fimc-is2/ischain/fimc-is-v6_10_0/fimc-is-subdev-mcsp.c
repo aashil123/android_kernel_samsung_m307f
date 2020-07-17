@@ -517,7 +517,6 @@ static int fimc_is_ischain_mxp_tag(struct fimc_is_subdev *subdev,
 	struct camera2_node *node)
 {
 	int ret = 0;
-	struct fimc_is_group *head;
 	struct fimc_is_subdev *leader;
 	struct fimc_is_queue *queue;
 	struct mcs_param *mcs_param;
@@ -659,15 +658,6 @@ static int fimc_is_ischain_mxp_tag(struct fimc_is_subdev *subdev,
 		if (ret) {
 			mswarn("%d frame is drop", device, subdev, ldr_frame->fcount);
 			node->request = 0;
-		} else {
-			/*
-			 * For supporting multi input to single output.
-			 * But this function is not supported in full OTF chain.
-			 */
-			if (device->group_mcs.head)
-				head = device->group_mcs.head;
-			else
-				head = &device->group_mcs;
 		}
 	} else {
 		ret = fimc_is_ischain_mxp_stop(device,

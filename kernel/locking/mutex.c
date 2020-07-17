@@ -803,7 +803,7 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 	if (__mutex_waiter_is_first(lock, &waiter))
 		__mutex_set_flag(lock, MUTEX_FLAG_WAITERS);
 
-	sec_debug_set_wait_data(DTYPE_MUTEX, (void *)lock);
+	sec_debug_wtsk_set_data(DTYPE_MUTEX, (void *)lock);
 	set_current_state(state);
 	for (;;) {
 		/*
@@ -859,7 +859,7 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 	spin_lock(&lock->wait_lock);
 acquired:
 	__set_current_state(TASK_RUNNING);
-	sec_debug_set_wait_data(DTYPE_NONE, NULL);
+	sec_debug_wtsk_set_data(DTYPE_NONE, NULL);
 
 	mutex_remove_waiter(lock, &waiter, current);
 	if (likely(list_empty(&lock->wait_list)))
@@ -880,7 +880,7 @@ skip_wait:
 
 err:
 	__set_current_state(TASK_RUNNING);
-	sec_debug_set_wait_data(DTYPE_NONE, NULL);
+	sec_debug_wtsk_set_data(DTYPE_NONE, NULL);
 	mutex_remove_waiter(lock, &waiter, current);
 err_early_backoff:
 	spin_unlock(&lock->wait_lock);

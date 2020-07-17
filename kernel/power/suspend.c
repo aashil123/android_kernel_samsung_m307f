@@ -678,9 +678,8 @@ int pm_suspend(suspend_state_t state)
 
 	if (state <= PM_SUSPEND_ON || state >= PM_SUSPEND_MAX)
 		return -EINVAL;
-
 #ifdef CONFIG_SEC_PM_DEBUG
-	pm_suspend_marker("entry"); 
+	pm_suspend_marker("entry");
 #else
 	pr_info("suspend entry (%s)\n", mem_sleep_labels[state]);
 #endif

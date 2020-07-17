@@ -337,6 +337,9 @@ struct fimc_is_video {
 	const struct vb2_mem_ops	*vb2_mem_ops;
 	const struct fimc_is_vb2_buf_ops *fimc_is_vb2_buf_ops;
 	void				*alloc_ctx;
+
+	struct semaphore		smp_multi_input;
+	bool				try_smp;
 };
 
 /* video context operation */

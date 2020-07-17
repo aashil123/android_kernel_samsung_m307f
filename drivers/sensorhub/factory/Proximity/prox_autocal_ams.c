@@ -339,60 +339,6 @@ ssize_t set_proximity_ams_avg_raw_data(struct ssp_data *data,
 	return ret;
 }
 
-
-ssize_t get_proximity_ams_setting(char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "%d\n", 1);
-}
-
-ssize_t set_proximity_ams_setting(struct ssp_data *data, const char *buf)
-{
-	int ret;
-	u8 val[2] = {0, };
-	char *token;
-	char *str;
-
-	pr_info("[SSP] %s - %s\n", __func__, buf);
-
-	//parsing
-	str = (char *)buf;
-	token = strsep(&str, " \n");
-	if (token == NULL) {
-		pr_err("[SSP] %s : too few arguments (2 needed)", __func__);
-		return -EINVAL;
-	}
-
-	ret = kstrtou8(token, 10, &val[0]);
-	if (ret < 0) {
-		pr_err("[SSP] %s : kstrtou8 error %d", __func__, ret);
-		return ret;
-	}
-
-	token = strsep(&str, " \n");
-	if (token == NULL) {
-		pr_err("[SSP] %s : too few arguments (2 needed)", __func__);
-		return -EINVAL;
-	}
-
-	ret = kstrtou8(token, 16, &val[1]);
-	if (ret < 0) {
-		pr_err("[SSP] %s : kstrtou8 error %d", __func__, ret);
-		return ret;
-	}
-
-	pr_info("[SSP] %s - index = %d value = 0x%x\n", __func__, val[0], val[1]);
-
-	ret = ssp_send_command(data, CMD_SETVALUE, SENSOR_TYPE_PROXIMITY,
-	                       PROXIMITY_SETTING, 0, &val[0], 2 * sizeof(char), NULL, NULL);
-
-	if (ret != SUCCESS) {
-		ssp_errf("ssp_send_command Fail %d", ret);
-	}
-
-	return ret;
-}
-
-
 struct proximity_sensor_operations prox_ams_auto_cal_ops = {
 	.get_proximity_name = get_proximity_ams_auto_cal_name,
 	.get_proximity_vendor = get_proximity_ams_auto_cal_vendor,
@@ -407,8 +353,6 @@ struct proximity_sensor_operations prox_ams_auto_cal_ops = {
 	.set_threshold_detect_low = set_ams_threshold_detect_low,
 	.get_proximity_avg_raw_data = get_proximity_ams_avg_raw_data,
 	.set_proximity_avg_raw_data = set_proximity_ams_avg_raw_data,
-	.get_proximity_setting = get_proximity_ams_setting,
-	.set_proximity_setting = set_proximity_ams_setting,
 	.get_proximity_raw_data = get_proximity_ams_auto_cal_raw_data,
 	.get_proximity_trim_value = get_proximity_ams_trim_value,
 	.get_proximity_trim_check = get_proximity_ams_trim_check,

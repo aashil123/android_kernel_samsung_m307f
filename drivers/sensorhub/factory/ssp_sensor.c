@@ -25,16 +25,12 @@
 #define MODEL_NAME      "CHUB_EXYNOS9610"
 
 #if defined(CONFIG_SENSORS_SSP_A50S)
-#define SSP_FIRMWARE_REVISION       	19081600
-#elif defined(CONFIG_SENSORS_SSP_A51)
-#define SSP_FIRMWARE_REVISION       	19073100
+#define SSP_FIRMWARE_REVISION       	20011400
 #elif defined(CONFIG_SENSORS_SSP_M30S)
-#define SSP_FIRMWARE_REVISION       	19081600
+#define SSP_FIRMWARE_REVISION       	20011400
 #else // CONFIG_SENSOR_SSP_A50
-#define SSP_FIRMWARE_REVISION       	19073100
+#define SSP_FIRMWARE_REVISION       	20011400
 #endif
-
-//#define 		CHECK_FWREV
 
 #define FACTORY_DATA_MAX        100
 static char buffer[FACTORY_DATA_MAX];
@@ -47,12 +43,8 @@ unsigned int get_module_rev(struct ssp_data *data)
 ssize_t mcu_revision_show(struct device *dev,
                           struct device_attribute *attr, char *buf)
 {
-#ifdef CHECK_FWREV
 	struct ssp_data *data = dev_get_drvdata(dev);
 	return sprintf(buf, "SLSI01%u,SLSI01%u\n", data->curr_fw_rev, get_module_rev(data));
-#else 
-	return sprintf(buf, "N,N\n");
-#endif
 }
 
 ssize_t mcu_model_name_show(struct device *dev,

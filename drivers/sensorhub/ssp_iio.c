@@ -150,7 +150,7 @@ void report_sensor_data(struct ssp_data *data, int type,
 	if (type == SENSOR_TYPE_PROXIMITY) {
 		ssp_info("Proximity Sensor Detect : %u, raw : %u",
 		         event->prox, event->prox_ex);
-#if CONFIG_SENSORS_SSP_PROXIMITY
+#ifdef CONFIG_SENSORS_SSP_PROXIMITY
 	} else if (type == SENSOR_TYPE_PROXIMITY_RAW) {
 		report_prox_raw_data(data, type, event);
 		return;

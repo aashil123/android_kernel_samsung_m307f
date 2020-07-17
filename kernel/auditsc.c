@@ -1349,8 +1349,7 @@ static void audit_log_exit(struct audit_context *context, struct task_struct *ts
 	context->personality = tsk->personality;
 
 // [ SEC_SELINUX_PORTING_COMMON
-	if ( (context->major != __NR_setsockopt) ||
-		 (context->major != __NR_io_setup)){
+	if (context->major != __NR_setsockopt) {
 // ] SEC_SELINUX_PORTING_COMMON
 	ab = audit_log_start(context, GFP_KERNEL, AUDIT_SYSCALL);
 	if (!ab)

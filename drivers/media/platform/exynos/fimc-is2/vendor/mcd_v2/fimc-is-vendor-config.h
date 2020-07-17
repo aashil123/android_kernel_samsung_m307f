@@ -23,6 +23,9 @@
 #include "fimc-is-vendor-config_vxp_v00.h"
 #elif defined(CONFIG_CAMERA_AAS_V50)
 #include "fimc-is-vendor-config_aas_v50.h"
+#elif defined(CONFIG_CAMERA_AAS_V51)
+#include "fimc-is-vendor-config_aas_v51.h"
+#include "fimc-is-vendor-sensor-pwr_aas_v51.h"
 #elif defined(CONFIG_CAMERA_AAS_V80)
 #include "fimc-is-vendor-config_aas_v80.h"
 #include "fimc-is-vendor-sensor-pwr_aas_v80.h"

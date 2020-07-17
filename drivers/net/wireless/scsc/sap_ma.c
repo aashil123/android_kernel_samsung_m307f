@@ -15,7 +15,9 @@
 #include "hip4_sampler.h"
 #include "traffic_monitor.h"
 
+#ifdef CONFIG_ANDROID
 #include "scsc_wifilogger_rings.h"
+#endif
 
 #define SUPPORTED_OLD_VERSION   0
 
@@ -64,6 +66,10 @@ static int sap_ma_notifier(struct slsi_dev *sdev, unsigned long event)
 
 	case SCSC_WIFI_RESUME:
 		break;
+	case SCSC_WIFI_CHIP_READY:
+		break;
+	case SCSC_WIFI_SUBSYSTEM_RESET:
+		break;
 	default:
 		SLSI_INFO_NODEV("Unknown event code %lu\n", event);
 		break;
@@ -105,14 +111,23 @@ static int slsi_rx_amsdu_deaggregate(struct net_device *dev, struct sk_buff *skb
 	while (!last_sub_frame) {
 		msdu_len = (skb->data[ETH_ALEN * 2] << 8) | skb->data[(ETH_ALEN * 2) + 1];
 
-		/* check if the length of sub-frame is valid */
-		if (msdu_len > skb->len) {
+		/* check if the MSDU length field is non-zero or if length is valid */
+		if (!msdu_len || msdu_len >= skb->len) {
 			SLSI_NET_ERR(dev, "invalid MSDU length %d, SKB length = %d\n", msdu_len, skb->len);
+			__skb_queue_purge(msdu_list);
 			slsi_kfree_skb(skb);
 			return -EINVAL;
 		}
 
 		subframe_len = msdu_len + (2 * ETH_ALEN) + 2;
+
+		/* check if the length of sub-frame is valid */
+		if (subframe_len > skb->len) {
+			SLSI_NET_ERR(dev, "invalid subframe length %d, SKB length = %d\n", subframe_len, skb->len);
+			__skb_queue_purge(msdu_list);
+			slsi_kfree_skb(skb);
+			return -EINVAL;
+		}
 
 		/* For the last subframe skb length and subframe length will be same */
 		if (skb->len == subframe_len) {
@@ -166,8 +181,18 @@ static int slsi_rx_amsdu_deaggregate(struct net_device *dev, struct sk_buff *skb
 		}
 
 		/* If this is not the last subframe then move to the next subframe */
-		if (!last_sub_frame)
-			skb_pull(skb, (subframe_len + padding));
+		if (!last_sub_frame) {
+			/* If A-MSDU is not formed correctly (e.g when skb->len < subframe_len + padding),
+			 * skb_pull() will return NULL without any manipulation in skb.
+			 * It can lead to infinite loop.
+			 */
+			if (!skb_pull(skb, (subframe_len + padding))) {
+				SLSI_NET_ERR(dev, "Invalid subframe + padding length=%d, SKB length=%d\n", subframe_len + padding, skb->len);
+				__skb_queue_purge(msdu_list);
+				slsi_kfree_skb(skb);
+				return -EINVAL;
+			}
+		}
 
 		/* If this frame has been filtered out, free the clone and continue */
 		if (skip_frame) {
@@ -238,7 +263,7 @@ void slsi_rx_data_deliver_skb(struct slsi_dev *sdev, struct net_device *dev, str
 	} else {
 		__skb_queue_tail(&msdu_list, skb);
 	}
-
+	/* WARNING: skb may be NULL here and should not be used after this */
 	while (!skb_queue_empty(&msdu_list)) {
 		struct sk_buff *rx_skb;
 
@@ -307,6 +332,43 @@ void slsi_rx_data_deliver_skb(struct slsi_dev *sdev, struct net_device *dev, str
 		ndev_vif->stats.rx_packets++;
 		ndev_vif->stats.rx_bytes += rx_skb->len;
 		ndev_vif->rx_packets[trafic_q]++;
+
+#ifdef CONFIG_SCSC_WLAN_STA_ENHANCED_ARP_DETECT
+	if (!ndev_vif->enhanced_arp_stats.is_duplicate_addr_detected) {
+		u8 *frame = rx_skb->data + 12; /* frame points to packet type */
+		u16 packet_type = frame[0] << 8 | frame[1];
+
+		if (packet_type == ETH_P_ARP) {
+			frame = frame + 2; /* ARP packet */
+			/*match source IP address in ARP with the DUT Ip address*/
+			if ((frame[SLSI_ARP_SRC_IP_ADDR_OFFSET] == (ndev_vif->ipaddress & 255)) &&
+			    (frame[SLSI_ARP_SRC_IP_ADDR_OFFSET + 1] == ((ndev_vif->ipaddress >>  8U) & 255)) &&
+			    (frame[SLSI_ARP_SRC_IP_ADDR_OFFSET + 2] == ((ndev_vif->ipaddress >> 16U) & 255)) &&
+			    (frame[SLSI_ARP_SRC_IP_ADDR_OFFSET + 3] == ((ndev_vif->ipaddress >> 24U) & 255)) &&
+			    !SLSI_IS_GRATUITOUS_ARP(frame) &&
+			    !SLSI_ETHER_EQUAL(sdev->hw_addr, frame + 8)) /*if src MAC = DUT MAC */
+				ndev_vif->enhanced_arp_stats.is_duplicate_addr_detected = 1;
+		}
+	}
+
+	if (ndev_vif->enhanced_arp_detect_enabled && (ndev_vif->vif_type == FAPI_VIFTYPE_STATION)) {
+		u8 *frame = rx_skb->data + 12; /* frame points to packet type */
+		u16 packet_type = frame[0] << 8 | frame[1];
+		u16 arp_opcode;
+
+		if (packet_type == ETH_P_ARP) {
+			frame = frame + 2; /* ARP packet */
+			arp_opcode = frame[SLSI_ARP_OPCODE_OFFSET] << 8 | frame[SLSI_ARP_OPCODE_OFFSET + 1];
+			/* check if sender ip = gateway ip and it is an ARP response */
+			if ((arp_opcode == SLSI_ARP_REPLY_OPCODE) &&
+			    !SLSI_IS_GRATUITOUS_ARP(frame) &&
+			    !memcmp(&frame[SLSI_ARP_SRC_IP_ADDR_OFFSET], &ndev_vif->target_ip_addr, 4)) {
+				ndev_vif->enhanced_arp_stats.arp_rsp_count_to_netdev++;
+				ndev_vif->enhanced_arp_stats.arp_rsp_rx_count_by_upper_mac++;
+			}
+		}
+	}
+#endif
 
 		rx_skb->dev = dev;
 		rx_skb->ip_summed = CHECKSUM_NONE;
@@ -486,7 +548,23 @@ static int slsi_rx_napi_process(struct slsi_dev *sdev, struct sk_buff *skb)
 	vif = fapi_get_vif(skb);
 
 	rcu_read_lock();
+#ifdef CONFIG_SCSC_WIFI_NAN_ENABLE
+	if (vif >= SLSI_NAN_DATA_IFINDEX_START && fapi_get_sigid(skb) == MA_UNITDATA_IND) {
+		struct ethhdr *eth_hdr = (struct ethhdr *)fapi_get_data(skb);
+		u32 data_len = fapi_get_datalen(skb);
+
+		if (!eth_hdr || data_len < sizeof(*eth_hdr)) {
+			SLSI_WARN(sdev, "Unexpected datalen:%d\n", data_len);
+			rcu_read_unlock();
+			return -EINVAL;
+		}
+		dev = slsi_get_netdev_by_mac_addr_lockless(sdev, eth_hdr->h_dest, SLSI_NAN_DATA_IFINDEX_START);
+	} else {
+		dev = slsi_get_netdev_rcu(sdev, vif);
+	}
+#else
 	dev = slsi_get_netdev_rcu(sdev, vif);
+#endif
 	if (!dev) {
 		SLSI_ERR(sdev, "netdev(%d) No longer exists\n", vif);
 		rcu_read_unlock();
@@ -587,7 +665,24 @@ static int slsi_rx_queue_data(struct slsi_dev *sdev, struct sk_buff *skb)
 	vif = fapi_get_vif(skb);
 
 	rcu_read_lock();
+#ifdef CONFIG_SCSC_WIFI_NAN_ENABLE
+	if (vif >= SLSI_NAN_DATA_IFINDEX_START && fapi_get_sigid(skb) == MA_UNITDATA_IND) {
+		struct ethhdr *eth_hdr = (struct ethhdr *)fapi_get_data(skb);
+		u32 data_len = fapi_get_datalen(skb);
+
+		if (!eth_hdr || data_len < sizeof(*eth_hdr)) {
+			SLSI_ERR(sdev, "ma_untidata_ind dropped. datalen:%d\n", data_len);
+			rcu_read_unlock();
+			return 0; /* return success */
+		}
+		dev = slsi_get_netdev_by_mac_addr_locked(sdev, eth_hdr->h_dest, SLSI_NAN_DATA_IFINDEX_START);
+	} else {
+		dev = slsi_get_netdev_rcu(sdev, vif);
+	}
+#else
 	dev = slsi_get_netdev_rcu(sdev, vif);
+#endif
+
 	if (!dev) {
 		SLSI_ERR(sdev, "netdev(%d) No longer exists\n", vif);
 		rcu_read_unlock();
@@ -659,12 +754,12 @@ static int sap_ma_txdone(struct slsi_dev *sdev, u16 colour)
 	/* colour is defined as: */
 	/* u16 register bits:
 	 * 0      - do not use
-	 * [2:1]  - vif
-	 * [7:3]  - peer_index
+	 * [3:1]  - vif
+	 * [7:4]  - peer_index
 	 * [10:8] - ac queue
 	 */
-	vif = (colour & 0x6) >> 1;
-	peer_index = (colour & 0xf8) >> 3;
+	vif = (colour & 0xE) >> 1;
+	peer_index = (colour & 0xF0) >> 4;
 	ac = (colour & 0x300) >> 8;
 
 	rcu_read_lock();

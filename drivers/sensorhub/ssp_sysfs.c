@@ -45,6 +45,9 @@ int enable_legacy_sensor(struct ssp_data *data, unsigned int type)
 	if (type == SENSOR_TYPE_PROXIMITY) {
 #ifdef CONFIG_SENSORS_SSP_PROXIMITY
 		set_proximity_threshold(data);
+#ifdef CONFIG_SENSORS_SSP_PROXIMITY_MODIFY_SETTINGS
+		set_proximity_setting_mode(data);
+#endif
 #endif
 #ifdef CONFIG_SENSORS_SSP_LIGHT
 	} else if (type == SENSOR_TYPE_LIGHT) {
@@ -250,15 +253,19 @@ ssize_t mcu_reset_show(struct device *dev,
                        struct device_attribute *attr, char *buf)
 {
 	struct ssp_data *data = dev_get_drvdata(dev);
-	bool is_success = true;
+	bool is_success = false;
 	int ret = 0;
+	int prev_reset_cnt;
 
-	data->is_reset_started = true;
+	prev_reset_cnt = data->cnt_reset;
 	data->is_reset_from_sysfs = true;
-	ret = reset_mcu(data);
+	reset_mcu(data);
 
-	if(ret != 0) {
-		is_success = false;
+	ret = ssp_wait_event_timeout(&data->reset_lock, 2000);
+	
+	ssp_infof("");
+	if(ret == SUCCESS && is_sensorhub_working(data) && prev_reset_cnt != data->cnt_reset) {
+		is_success = true;
 	}
 	
 	return sprintf(buf, "%s\n", (is_success ? "OK" : "NG"));
@@ -783,6 +790,43 @@ static DEVICE_ATTR(make_command, S_IWUSR | S_IWGRP,
 static DEVICE_ATTR(register_rw, S_IRUGO | S_IWUSR | S_IWGRP, register_rw_show, register_rw_store);
 #endif  /* CONFIG_SSP_REGISTER_RW */
 
+
+#ifdef CONFIG_SENSORS_SSP_LIGHT
+static ssize_t set_hall_ic_status(struct device *dev,
+                         struct device_attribute *attr, const char *buf, size_t size)
+{
+	int ret = 0;
+	u8 hall_ic = 0;
+	struct ssp_data *data = dev_get_drvdata(dev);
+
+	if (kstrtou8(buf, 10, &hall_ic) < 0) {
+		return -EINVAL;
+	}
+
+	ssp_infof("%d", hall_ic);
+
+	if (!(data->sensor_probe_state & (1ULL << SENSOR_TYPE_LIGHT_AUTOBRIGHTNESS))) {
+		ssp_infof("light autobrightness sensor is not connected(0x%llx)\n",
+		        data->sensor_probe_state);
+
+		return size;
+	}
+
+	ret = ssp_send_command(data, CMD_SETVALUE, SENSOR_TYPE_LIGHT_AUTOBRIGHTNESS, HALL_IC_STATUS, 0,
+	                       (char *)&hall_ic, sizeof(hall_ic), NULL, NULL);
+
+	if (ret != SUCCESS) {
+		ssp_errf("CMD fail %d\n",ret);
+		return size;
+	}
+
+	return size;
+}
+
+static DEVICE_ATTR(hall_ic, S_IWUSR | S_IWGRP,
+                   NULL, set_hall_ic_status);
+#endif
+
 /* ssp_sensor sysfs */
 
 static DEVICE_ATTR(mcu_rev, S_IRUGO, mcu_revision_show, NULL);
@@ -815,6 +859,7 @@ static DEVICE_ATTR(mcu_test, S_IRUGO | S_IWUSR | S_IWGRP,
 static DEVICE_ATTR(mcu_sleep_test, S_IRUGO | S_IWUSR | S_IWGRP,
                    mcu_sleep_factorytest_show, mcu_sleep_factorytest_store);
 
+
 static struct device_attribute *mcu_attrs[] = {
 	&dev_attr_mcu_rev,
 	&dev_attr_mcu_name,
@@ -835,6 +880,9 @@ static struct device_attribute *mcu_attrs[] = {
 	&dev_attr_ssp_dump,
 	&dev_attr_mcu_test,
 	&dev_attr_mcu_sleep_test,
+#ifdef CONFIG_SENSORS_SSP_LIGHT
+	&dev_attr_hall_ic,
+#endif
 	NULL,
 };
 

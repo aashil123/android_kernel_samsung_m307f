@@ -183,7 +183,7 @@ struct force_error force_error_vector = {
 		{"irqstorm",	&simulate_IRQ_STORM},
 		{"syncirqlockup",	&simulate_SYNC_IRQ_LOCKUP},
 		{"disksleep",	&simulate_DISK_SLEEP},
-		{"CDW",	&simulate_CORRUPT_DELAYED_WORK},
+		{"CDW",		&simulate_CORRUPT_DELAYED_WORK},
 		{"mutexaa",	&simulate_MUTEX_AA},
 		{"mutexabba",	&simulate_MUTEX_ABBA},
 	}
@@ -919,9 +919,10 @@ static void simulate_CORRUPT_DELAYED_WORK(char *arg)
 {
 	struct debug_delayed_work_info *info;
 
-	pr_crit("%s()\n", __func__);
-
 	info = kzalloc(sizeof(struct debug_delayed_work_info), GFP_KERNEL);
+
+	pr_crit("%s(): address of info is 0x%p\n", __func__, info);
+
 	if (!info)
 		return;
 

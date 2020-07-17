@@ -222,7 +222,7 @@ static void etspi_power_control(struct etspi_data *etspi, int status)
 		usleep_range(1100, 1150);
 		if (etspi->sleepPin)
 			gpio_set_value(etspi->sleepPin, 1);
-		usleep_range(10000, 10050);
+		usleep_range(12000, 12050);
 	} else if (status == 0) {
 #if defined(ENABLE_SENSORS_FPRINT_SECURE)
 #if !defined(CONFIG_TZDEV)

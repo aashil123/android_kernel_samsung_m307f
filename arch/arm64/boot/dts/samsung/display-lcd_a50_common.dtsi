@@ -1,7 +1,7 @@
 /*
  * SAMSUNG LCD Panel Device Tree Source
  *
- * Copyright (c) 2017 Samsung Electronics Co., Ltd.
+ * Copyright (c) Samsung Electronics Co., Ltd.
  *		http://www.samsung.com
  *
  * This program is free software; you can redistribute it and/or modify
@@ -13,10 +13,14 @@
 	fragment@lcd {
 		target-path = "/";
 		__overlay__ {
-			decon_board: decon_board {
-				gpio_lcd_rst = <&gpg1 3 0x1>;
-				gpio_lcd_en_3p0 = <&gpg2 4 0x1>;
-				gpio_lcd_en_1p8 = <&gpg1 2 0x1>;
+			decon_board_ea8076: decon_board_ea8076 {
+				gpio_pcd = <&gpa0 1 0x1>;	/* EL_ON1_DET */
+				gpio_err = <&gpa1 1 0x1>;	/* FG_ERR */
+				gpio_con = <&gpa0 7 0x0>;	/* LCD_CON */
+
+				gpio_lcd_rst = <&gpg1 3 0>;
+				gpio_lcd_en_3p0 = <&gpg2 4 0>;
+				gpio_lcd_en_1p8 = <&gpg1 2 0>;
 
 				dsim_set_panel_power_enable {
 					type =
@@ -45,7 +49,7 @@
 				};
 			};
 
-			ea8076: ea8076_fhd {
+			ea8076: ea8076 {
 				mode = <2>; /* 0: video mode, 1: DP command mode, 2: MIPI command mode */
 				resolution = <1080 2340>;
 				size = <68 147>;	/* 67.932 * 147.186 */
@@ -67,6 +71,7 @@
 				cmd_underrun_lp_ref = <2076>;	/* for underrun detect at command mode */
 				mres_en = <0>;
 				noncontinuous_clklane = <0>;	/* 0: Disable, 1: Enable */
+				decon_board = <&decon_board_ea8076>;
 			};
 		};
 	};
@@ -74,12 +79,11 @@
 
 &dsim_0 {
 	lcd_info = <&ea8076>;
-	decon_board = <&decon_board>;
 };
 
 &decon_f {
-	gpio_pcd = <&gpa0 1 0x1>;		/* EL_ON1_DET */
-	gpio_err = <&gpa1 1 0x1>;		/* FG_ERR */
-	gpio_con = <&gpa0 7 0x0>;		/* LCD_CON  */
+	psr_mode = <2>;		/* 0: video mode, 1: DP command mode, 2: MIPI command mode */
+	trig_mode = <0>;	/* 0: hw trigger, 1: sw trigger */
+	dsi_mode = <0>;		/* 0: single dsi, 1: dual dsi */
 };
 

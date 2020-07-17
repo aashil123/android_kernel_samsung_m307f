@@ -256,10 +256,8 @@ int ssp_send_command(struct ssp_data *data, u8 cmd, u8 type, u8 subcmd,
 	//mutex_unlock(&data->cmd_mutex);
 
 	if(status < 0) {
-		if(data->is_reset_started == false) {
-			recovery_mcu(data, RESET_KERNEL_COM_FAIL);
-		}
-		ssp_errf("status=%d, is_reset_started=%d", status, data->is_reset_started);
+		recovery_mcu(data, RESET_KERNEL_COM_FAIL);
+		ssp_errf("status=%d", status);
 	}
 	return status;
 }

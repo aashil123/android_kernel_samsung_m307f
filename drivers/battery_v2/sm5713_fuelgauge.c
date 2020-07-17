@@ -250,8 +250,14 @@ static unsigned int sm5713_get_vbat(struct sm5713_fuelgauge_data *fuelgauge)
 		if (fuelgauge->isjigmoderealvbat)
 			pr_info("%s : nENQ4 high JIG_ON, BUT need real VBAT \n", __func__, ret);
 		else {
+			sm5713_write_word(fuelgauge->i2c, SM5713_FG_REG_BAT_PTT1, 0x0109);
 			ret = sm5713_read_word(fuelgauge->i2c, SM5713_FG_REG_VOLTAGE_VSYS);
 			pr_info("%s : nENQ4 high JIG_ON, vsys register read result 0x%x\n", __func__, ret);
+		}
+	}
+	else {
+		if(sm5713_read_word(fuelgauge->i2c, SM5713_FG_REG_BAT_PTT1) != 0x0100) {
+			sm5713_write_word(fuelgauge->i2c, SM5713_FG_REG_BAT_PTT1, 0x0100);
 		}
 	}
 
@@ -2456,6 +2462,10 @@ static int sm5713_fg_get_property(struct power_supply *psy,
 				val->intval = -1;
 			pr_info("%s: jig gpio = %d \n", __func__, val->intval);
 			break;
+		case POWER_SUPPLY_EXT_PROP_MEASURE_SYS:
+			/* not supported */
+			val->intval = 0;
+			break;
 		default:
 			return -EINVAL;			
 		}
@@ -2556,6 +2566,7 @@ static int sm5713_fg_set_property(struct power_supply *psy,
 		fuelgauge->initial_update_of_soc = true;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_ENABLED:
+	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
 		break;
 #if defined(CONFIG_BATTERY_AGE_FORECAST)
 	case POWER_SUPPLY_PROP_CAPACITY_LEVEL:

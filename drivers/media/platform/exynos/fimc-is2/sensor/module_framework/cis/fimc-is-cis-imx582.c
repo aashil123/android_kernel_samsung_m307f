@@ -218,6 +218,8 @@ static void sensor_imx582_cis_data_calculation(const struct sensor_pll_info_comp
 	cis_data->line_readOut_time = sensor_cis_do_div64((u64)cis_data->line_length_pck * (u64)(1000 * 1000 * 1000), cis_data->pclk);
 	cis_data->rolling_shutter_skew = (cis_data->cur_height - 1) * cis_data->line_readOut_time;
 	cis_data->stream_on = false;
+	cis_data->max_coarse_integration_time =
+		pll_info->frame_length_lines - SENSOR_IMX582_COARSE_INTEGRATION_TIME_MAX_MARGIN;
 
 	/* Frame valid time calcuration */
 	frame_valid_us = sensor_cis_do_div64((u64)cis_data->cur_height * (u64)cis_data->line_length_pck * (u64)(1000 * 1000), cis_data->pclk);
@@ -1123,6 +1125,23 @@ int sensor_imx582_cis_adjust_frame_duration(struct v4l2_subdev *subdev,
 	pix_rate_freq_mhz = cis_data->pclk / (1000 * 1000);
 	line_length_pck = cis_data->line_length_pck;
 	coarse_integ_time = ((pix_rate_freq_mhz * input_exposure_time) / line_length_pck);
+
+	if (cis->min_fps == cis->max_fps) {
+		dbg_sensor(1, "[%s] requested min_fps(%d), max_fps(%d) from HAL\n", __func__, cis->min_fps, cis->max_fps);
+
+		if (coarse_integ_time > cis_data->max_coarse_integration_time) {
+			dbg_sensor(1, "[MOD:D:%d] %s, vsync_cnt(%d), coarse(%d) max(%d)\n", cis->id, __func__,
+				cis_data->sen_vsync_count, coarse_integ_time, cis_data->max_coarse_integration_time);
+			coarse_integ_time = cis_data->max_coarse_integration_time;
+		}
+
+		if (coarse_integ_time < cis_data->min_coarse_integration_time) {
+			dbg_sensor(1, "[MOD:D:%d] %s, vsync_cnt(%d), coarse(%d) min(%d)\n", cis->id, __func__,
+				cis_data->sen_vsync_count, coarse_integ_time, cis_data->min_coarse_integration_time);
+			coarse_integ_time = cis_data->min_coarse_integration_time;
+		}
+	}
+
 	frame_length_lines = coarse_integ_time + cis_data->max_margin_coarse_integration_time;
 
 	frame_duration = (frame_length_lines * line_length_pck) / pix_rate_freq_mhz;
@@ -1132,8 +1151,6 @@ int sensor_imx582_cis_adjust_frame_duration(struct v4l2_subdev *subdev,
 			__func__, cis_data->sen_vsync_count, input_exposure_time, frame_duration, cis_data->min_frame_us_time);
 	dbg_sensor(1, "[%s](vsync cnt = %d) adj duration, frame duraion(%d), min_frame_us(%d), max_frame_us_time(%d)\n",
 			__func__, cis_data->sen_vsync_count, frame_duration, cis_data->min_frame_us_time, max_frame_us_time);
-
-	dbg_sensor(1, "[%s] requested min_fps(%d), max_fps(%d) from HAL\n", __func__, cis->min_fps, cis->max_fps);
 
 	*target_duration = MAX(frame_duration, cis_data->min_frame_us_time);
 	if(cis->min_fps == cis->max_fps) {
@@ -1192,11 +1209,20 @@ int sensor_imx582_cis_set_frame_duration(struct v4l2_subdev *subdev, u32 frame_d
 	line_length_pck = cis_data->line_length_pck;
 
 	frame_length_lines = (u16)((pix_rate_freq_mhz * frame_duration) / line_length_pck);
-
 	dbg_sensor(1, "[MOD:D:%d] %s, pix_rate_freq_mhz(%#x) frame_duration = %d us,"
 			KERN_CONT "(line_length_pck%#x), frame_length_lines(%#x)\n",
 			cis->id, __func__, pix_rate_freq_mhz, frame_duration,
 			line_length_pck, frame_length_lines);
+
+	/* When SM/SSM is setted to fixed 240fps */
+	if (frame_duration == SENSOR_IMX582_240FPS_FRAME_DURATION_US) {
+		frame_length_lines = cis_data->frame_length_lines;
+
+		dbg_sensor(1, "[MOD:D:%d] %s, frame_duration = %d us, fixed frame rate for 240FPS"
+				KERN_CONT "(line_length_pck%#x), frame_length_lines(%#x)\n",
+				cis->id, __func__, frame_duration,
+				line_length_pck, frame_length_lines);
+	}
 
 	hold = sensor_imx582_cis_group_param_hold(subdev, 0x01);
 	if (hold < 0) {
@@ -1485,6 +1511,10 @@ int sensor_imx582_cis_get_max_exposure_time(struct v4l2_subdev *subdev, u32 *max
 
 	/* To Do: is udating this value right hear? */
 	cis_data->max_coarse_integration_time = max_coarse;
+
+
+	dbg_sensor(1, "[%s] frame_length_lines %d, line_length_pck %d\n",
+			__func__, frame_length_lines, line_length_pck);
 
 	dbg_sensor(1, "[%s] max integration time %d, max coarse integration %d\n",
 			__func__, max_integration_time, cis_data->max_coarse_integration_time);

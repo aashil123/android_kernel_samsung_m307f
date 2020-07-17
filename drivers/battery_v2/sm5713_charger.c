@@ -1186,9 +1186,9 @@ static int sm5713_charger_probe(struct platform_device *pdev)
 	return 0;
 
 err_reg_irq:
-	power_supply_unregister(charger->psy_chg);
-err_power_supply_register_otg:
 	power_supply_unregister(charger->psy_otg);
+err_power_supply_register_otg:
+	power_supply_unregister(charger->psy_chg);
 err_power_supply_register:
 err_parse_dt:
 err_parse_dt_nomem:

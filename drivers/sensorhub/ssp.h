@@ -62,7 +62,9 @@
 #ifdef CONFIG_SENSORS_SSP_PROXIMITY_STK3X3X 
 #define CONFIG_SENSROS_SSP_PROXIMITY_THRESH_CAL
 #endif
-
+#ifdef CONFIG_SENSORS_SSP_PROXIMITY_GP2AP110S
+#define CONFIG_SENSORS_SSP_PROXIMITY_MODIFY_SETTINGS
+#endif
 #define SENSOR_NAME_MAX_LEN             35
 
 struct sensor_info {
@@ -123,13 +125,14 @@ struct sensor_value {
 		struct { /* light */
 			u32 lux;
 			s32 cct;
-			u32 brightness;
+			u32 raw_lux;
 			u16 r;
 			u16 g;
 			u16 b;
 			u16 w;
 			u16 a_time;
 			u16 a_gain;
+			u32 brightness;
 		} __attribute__((__packed__));
 		struct { /* pressure */
 			s32 pressure;
@@ -187,6 +190,14 @@ struct calibraion_data {
 	s16 z;
 };
 
+#ifdef CONFIG_SENSORS_SSP_MAGNETIC_MMC5603
+struct magnetic_calibration_data {
+	s32 offset_x;
+	s32 offset_y;
+	s32 offset_z;
+	s32 radius;
+};
+#else
 struct magnetic_calibration_data {
 	u8 accuracy;
 	s16 offset_x;
@@ -196,6 +207,7 @@ struct magnetic_calibration_data {
 	s16 flucv_y;
 	s16 flucv_z;
 };
+#endif
 
 struct sensor_info;
 
@@ -210,21 +222,29 @@ struct sensor_en_info {
 	struct time_info unregi_time;	
 };
 
-struct ssp_data {
-	/* yum ToDo: it will be removed */
-	bool is_refresh_done;
+struct ssp_waitevent {
+	wait_queue_head_t waitqueue;
+	atomic_t state;
+};	
 
+struct ssp_data {
 	bool is_probe_done;
 	struct wake_lock ssp_wake_lock;
-	unsigned int curr_fw_rev;
 	struct delayed_work work_refresh;
 	struct delayed_work work_power_on;
+	
+	struct work_struct work_reset;
+	struct ssp_waitevent reset_lock;
 	int cnt_reset;
 	unsigned int cnt_no_event_reset;
 
 	struct timer_list ts_sync_timer;
 	struct workqueue_struct *ts_sync_wq;
 	struct work_struct work_ts_sync;
+
+	char fw_name[50];
+	int fw_type; 
+	unsigned int curr_fw_rev;
 /* platform */
 	void *platform_data;
 	
@@ -312,6 +332,11 @@ struct ssp_data {
 	struct  proximity_sensor_operations *proximity_ops;
 	unsigned int prox_raw_avg[4];
 	bool is_proxraw_enabled;
+#ifdef CONFIG_SENSORS_SSP_PROXIMITY_MODIFY_SETTINGS
+	int prox_setting_mode;
+	u16 prox_setting_thresh[2]; /* high, low*/
+	u16 prox_mode_thresh[PROX_THRESH_SIZE]; /* high, low*/
+#endif
 #if defined(CONFIG_SENSORS_SSP_PROXIMITY_AUTO_CAL_TMD3725)
 	u8 prox_thresh[PROX_THRESH_SIZE]; /* high, low, detect_hight, detect_low*/
 #else

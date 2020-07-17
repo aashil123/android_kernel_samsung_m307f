@@ -25,7 +25,7 @@
 
 #if defined(CONFIG_EXYNOS_DECON_MDNIE)
 #include "mdnie.h"
-#include "mdnie_table_a50.h"
+#include "ea8076_a50_mdnie.h"
 #endif
 
 #if defined(CONFIG_DISPLAY_USE_INFO)
@@ -63,6 +63,16 @@ union elvss_info {
 	struct {
 		u8 offset;
 		u8 tset;
+		u16 reserved;
+	};
+};
+
+union lpm_info {
+	u32 value;
+	struct {
+		u8 state;
+		u8 mode;	/* comes from sysfs. 0(off), 1(alpm 2nit), 2(hlpm 2nit), 3(alpm 60nit), 4(hlpm 60nit) or 1(alpm), 2(hlpm) */
+		u8 ver;		/* comes from sysfs. 0(old), 1(new) */
 		u16 reserved;
 	};
 };
@@ -113,19 +123,13 @@ struct lcd_info {
 	struct notifier_block		dpui_notif;
 #endif
 
-#if defined(CONFIG_LCD_HMT)
-	unsigned int			hmt_on;
-	unsigned int			hmt_brightness;
-#endif
-
 #if defined(CONFIG_EXYNOS_DOZE)
-	unsigned int			alpm;
-	unsigned int			current_alpm;
-	unsigned int			doze_state;
+	union lpm_info			alpm;
+	union lpm_info			current_alpm;
 
 #if defined(CONFIG_SEC_FACTORY)
 	unsigned int			prev_brightness;
-	unsigned int			prev_alpm;
+	union lpm_info			prev_alpm;
 #endif
 #endif
 #if defined(CONFIG_SUPPORT_MASK_LAYER)
@@ -141,11 +145,6 @@ struct lcd_info {
 	struct workqueue_struct		*conn_workqueue;
 	struct work_struct		conn_work;
 };
-
-#if defined(CONFIG_LCD_HMT)
-static int ea8076_hmt_update(struct lcd_info *lcd, u8 forced);
-static int hmt_init(struct lcd_info *lcd);
-#endif
 
 static int dsim_write_hl_data(struct lcd_info *lcd, const u8 *cmd, u32 cmdsize)
 {
@@ -215,7 +214,7 @@ exit:
 	return ret;
 }
 
-#if defined(CONFIG_EXYNOS_DECON_MDNIE)
+#if defined(CONFIG_EXYNOS_DECON_MDNIE) || defined(CONFIG_EXYNOS_DOZE)
 static int dsim_write_set(struct lcd_info *lcd, struct lcd_seq_info *seq, u32 num)
 {
 	int ret = 0, i;
@@ -229,7 +228,7 @@ static int dsim_write_set(struct lcd_info *lcd, struct lcd_seq_info *seq, u32 nu
 			}
 		}
 		if (seq[i].sleep)
-			usleep_range(seq[i].sleep * 1000, seq[i].sleep * 1100);
+			usleep_range(seq[i].sleep, seq[i].sleep);
 	}
 	return ret;
 }
@@ -346,15 +345,9 @@ static int dsim_panel_set_brightness(struct lcd_info *lcd, int force)
 	mutex_lock(&lcd->lock);
 
 #if defined(CONFIG_EXYNOS_DOZE)
-	if (lcd->doze_state) {
-		dev_info(&lcd->ld->dev, "%s: brightness: %d, doze_state: %d, %d, %d\n", __func__, lcd->bd->props.brightness, lcd->doze_state, lcd->current_alpm, lcd->alpm);
-		goto exit;
-	}
-#endif
-
-#if defined(CONFIG_LCD_HMT)
-	if (lcd->hmt_on) {
-		dev_info(&lcd->ld->dev, "%s: brightness: %d, hmt_state: %d\n", __func__, lcd->bd->props.brightness, lcd->hmt_on);
+	if (lcd->current_alpm.state) {
+		dev_info(&lcd->ld->dev, "%s: brightness: %3d, lpm: %06x(%06x)\n", __func__,
+			lcd->bd->props.brightness, lcd->current_alpm.value, lcd->alpm.value);
 		goto exit;
 	}
 #endif
@@ -421,6 +414,10 @@ static int ea8076_read_id(struct lcd_info *lcd)
 {
 	struct panel_private *priv = &lcd->dsim->priv;
 	int ret = 0;
+	struct decon_device *decon = get_decon_drvdata(0);
+	static char *LDI_BIT_DESC_ID[BITS_PER_BYTE * LDI_LEN_ID] = {
+		[0 ... 23] = "ID Read Fail",
+	};
 
 	lcd->id_info.value = 0;
 	priv->lcdconnected = lcd->connected = lcdtype ? 1 : 0;
@@ -429,6 +426,9 @@ static int ea8076_read_id(struct lcd_info *lcd)
 	if (ret < 0 || !lcd->id_info.value) {
 		priv->lcdconnected = lcd->connected = 0;
 		dev_info(&lcd->ld->dev, "%s: connected lcd is invalid\n", __func__);
+
+		if (!lcdtype && decon)
+			decon_abd_save_bit(&decon->abd, BITS_PER_BYTE * LDI_LEN_ID, cpu_to_be32(lcd->id_info.value), LDI_BIT_DESC_ID);
 	}
 
 	dev_info(&lcd->ld->dev, "%s: %x\n", __func__, cpu_to_be32(lcd->id_info.value));
@@ -644,24 +644,6 @@ static int ea8076_read_rddsm(struct lcd_info *lcd)
 	return ret;
 }
 
-#ifdef CONFIG_LOGGING_BIGDATA_BUG
-unsigned int get_panel_bigdata(struct dsim_device *dsim)
-{
-	struct lcd_info *lcd = dsim->priv.par;
-	unsigned int val = 0;
-
-	lcd->rddpm = 0xff;
-	lcd->rddsm = 0xff;
-
-	ea8076_read_rddpm(lcd);
-	ea8076_read_rddsm(lcd);
-
-	val = (lcd->rddpm  << 8) | lcd->rddsm;
-
-	return val;
-}
-#endif
-
 static int ea8076_read_init_info(struct lcd_info *lcd)
 {
 	int ret = 0;
@@ -707,8 +689,7 @@ static int ea8076_exit(struct lcd_info *lcd)
 
 #if defined(CONFIG_EXYNOS_DOZE)
 	mutex_lock(&lcd->lock);
-	lcd->current_alpm = ALPM_OFF;
-	lcd->doze_state = 0;
+	lcd->current_alpm.value = 0;
 	mutex_unlock(&lcd->lock);
 #endif
 
@@ -786,11 +767,6 @@ static int ea8076_init(struct lcd_info *lcd)
 	/* 10. Wait 110ms */
 	msleep(110);
 
-#if defined(CONFIG_LCD_HMT)
-	if (lcd->hmt_on == 1)
-		ea8076_hmt_update(lcd, 1);
-#endif
-
 	return ret;
 }
 
@@ -832,7 +808,7 @@ static int panel_dpui_notifier_callback(struct notifier_block *self,
 	set_dpui_field(DPUI_KEY_DISP_MODEL, tbuf, size);
 
 	size = snprintf(tbuf, MAX_DPUI_VAL_LEN, "0x%02X%02X%02X%02X%02X%02X",
-			lcd->code[0], lcd->code[1], lcd->code[2], lcd->code[3], lcd->code[4], lcd->code[5]);
+		lcd->code[0], lcd->code[1], lcd->code[2], lcd->code[3], lcd->code[4], lcd->code[5]);
 	set_dpui_field(DPUI_KEY_CHIPID, tbuf, size);
 
 	size = snprintf(tbuf, MAX_DPUI_VAL_LEN, "%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
@@ -889,8 +865,11 @@ static int fb_notifier_callback(struct notifier_block *self,
 	if (evdata->info->node)
 		return NOTIFY_DONE;
 
-	if (fb_blank == FB_BLANK_UNBLANK)
+	if (fb_blank == FB_BLANK_UNBLANK) {
+		mutex_lock(&lcd->lock);
 		ea8076_displayon(lcd);
+		mutex_unlock(&lcd->lock);
+	}
 
 	return NOTIFY_DONE;
 }
@@ -937,10 +916,6 @@ static int ea8076_probe(struct lcd_info *lcd)
 	if (ret < 0)
 		dev_info(&lcd->ld->dev, "%s: failed to init information\n", __func__);
 
-#if defined(CONFIG_LCD_HMT)
-	hmt_init(lcd);
-#endif
-
 	dsim_panel_set_brightness(lcd, 1);
 
 	dev_info(&lcd->ld->dev, "- %s\n", __func__);
@@ -953,33 +928,25 @@ static int ea8076_setalpm(struct lcd_info *lcd, int mode)
 {
 	int ret = 0;
 
-	/* 5. HLPM On setting Go to Page */
-	/* 5.2.3 HLPM On Setting */
+	dev_info(&lcd->ld->dev, "%s: brightness: %3d, lpm: %06x(%06x)\n", __func__,
+		lcd->bd->props.brightness, lcd->current_alpm.value, lcd->alpm.value);
+
 	switch (mode) {
-	case HLPM_ON_LOW:
-	case ALPM_ON_LOW:
-		DSI_WRITE(SEQ_TEST_KEY_ON_F0, ARRAY_SIZE(SEQ_TEST_KEY_ON_F0));
-		DSI_WRITE(SEQ_VLOUT3_SET, ARRAY_SIZE(SEQ_VLOUT3_SET));
-		DSI_WRITE(SEQ_HLPM_ON_02, ARRAY_SIZE(SEQ_HLPM_ON_02));
-		usleep_range(1, 2);
-		DSI_WRITE(SEQ_TEST_KEY_OFF_F0, ARRAY_SIZE(SEQ_TEST_KEY_OFF_F0));
-		dev_info(&lcd->ld->dev, "%s: HLPM_ON_02, %d\n", __func__, mode);
+	case AOD_HLPM_02_NIT:
+		dsim_write_set(lcd, LCD_SEQ_HLPM_02_NIT, ARRAY_SIZE(LCD_SEQ_HLPM_02_NIT));
 		break;
-	case HLPM_ON_HIGH:
-	case ALPM_ON_HIGH:
-		DSI_WRITE(SEQ_TEST_KEY_ON_F0, ARRAY_SIZE(SEQ_TEST_KEY_ON_F0));
-		DSI_WRITE(SEQ_VLOUT3_SET, ARRAY_SIZE(SEQ_VLOUT3_SET));
-		DSI_WRITE(SEQ_GPARA_68, ARRAY_SIZE(SEQ_GPARA_68));
-		DSI_WRITE(SEQ_HLPM_AOR_60, ARRAY_SIZE(SEQ_HLPM_AOR_60));
-		DSI_WRITE(SEQ_HLPM_ON_60, ARRAY_SIZE(SEQ_HLPM_ON_60));
-		usleep_range(1, 2);
-		DSI_WRITE(SEQ_TEST_KEY_OFF_F0, ARRAY_SIZE(SEQ_TEST_KEY_OFF_F0));
-		dev_info(&lcd->ld->dev, "%s: HLPM_ON_60, %d\n", __func__, mode);
+	case AOD_HLPM_10_NIT:
+		dsim_write_set(lcd, LCD_SEQ_HLPM_10_NIT, ARRAY_SIZE(LCD_SEQ_HLPM_10_NIT));
 		break;
-	default:
-		dev_info(&lcd->ld->dev, "%s: input is out of range: %d\n", __func__, mode);
+	case AOD_HLPM_30_NIT:
+		dsim_write_set(lcd, LCD_SEQ_HLPM_30_NIT, ARRAY_SIZE(LCD_SEQ_HLPM_30_NIT));
+		break;
+	case AOD_HLPM_60_NIT:
+		dsim_write_set(lcd, LCD_SEQ_HLPM_60_NIT, ARRAY_SIZE(LCD_SEQ_HLPM_60_NIT));
 		break;
 	}
+
+	dev_info(&lcd->ld->dev, "%s: %s\n", __func__, (mode < AOD_HLPM_STATE_MAX) ? AOD_HLPM_STATE_NAME[mode] : "unknown");
 
 	return ret;
 }
@@ -987,8 +954,10 @@ static int ea8076_setalpm(struct lcd_info *lcd, int mode)
 static int ea8076_enteralpm(struct lcd_info *lcd)
 {
 	int ret = 0;
+	union lpm_info lpm = {0, };
 
-	dev_info(&lcd->ld->dev, "%s: %d, %d, %d\n", __func__, lcd->current_alpm, lcd->alpm, lcd->lux);
+	dev_info(&lcd->ld->dev, "%s: brightness: %3d, lpm: %06x(%06x)\n", __func__,
+		lcd->bd->props.brightness, lcd->current_alpm.value, lcd->alpm.value);
 
 	mutex_lock(&lcd->lock);
 
@@ -997,12 +966,15 @@ static int ea8076_enteralpm(struct lcd_info *lcd)
 		goto exit;
 	}
 
-	if (lcd->current_alpm == lcd->alpm)
+	lpm.value = lcd->alpm.value;
+	lpm.state = (lpm.ver && lpm.mode) ? lpm_brightness_table[lcd->bd->props.brightness] : lpm_old_table[lpm.mode];
+
+	if (lcd->current_alpm.value == lpm.value)
 		goto exit;
 
 	/* 2. Image Write for HLPM Mode */
 	/* 3. HLPM/ALPM On Setting */
-	ret = ea8076_setalpm(lcd, lcd->alpm);
+	ret = ea8076_setalpm(lcd, lpm.state);
 	if (ret < 0)
 		dev_info(&lcd->ld->dev, "%s: failed to set alpm\n", __func__);
 
@@ -1012,7 +984,7 @@ static int ea8076_enteralpm(struct lcd_info *lcd)
 	/* 5. Display On(29h) */
 	/* DSI_WRITE(SEQ_DISPLAY_ON, ARRAY_SIZE(SEQ_DISPLAY_ON)); */
 
-	lcd->current_alpm = lcd->alpm;
+	lcd->current_alpm.value = lpm.value;
 exit:
 	mutex_unlock(&lcd->lock);
 	return ret;
@@ -1022,7 +994,8 @@ static int ea8076_exitalpm(struct lcd_info *lcd)
 {
 	int ret = 0;
 
-	dev_info(&lcd->ld->dev, "%s: %d, %d\n", __func__, lcd->current_alpm, lcd->alpm);
+	dev_info(&lcd->ld->dev, "%s: brightness: %3d, lpm: %06x(%06x)\n", __func__,
+		lcd->bd->props.brightness, lcd->current_alpm.value, lcd->alpm.value);
 
 	mutex_lock(&lcd->lock);
 
@@ -1032,16 +1005,13 @@ static int ea8076_exitalpm(struct lcd_info *lcd)
 	}
 
 	/* 5. HLPM/ALPM Off Setting */
-	DSI_WRITE(SEQ_TEST_KEY_ON_F0, ARRAY_SIZE(SEQ_TEST_KEY_ON_F0));
-	DSI_WRITE(SEQ_HLPM_OFF, ARRAY_SIZE(SEQ_HLPM_OFF));
-	usleep_range(1, 2);
-	DSI_WRITE(SEQ_TEST_KEY_OFF_F0, ARRAY_SIZE(SEQ_TEST_KEY_OFF_F0));
+	dsim_write_set(lcd, LCD_SEQ_HLPM_OFF, ARRAY_SIZE(LCD_SEQ_HLPM_OFF));
 
 	dev_info(&lcd->ld->dev, "%s: HLPM_OFF\n", __func__);
 
 	msleep(34);
 
-	lcd->current_alpm = ALPM_OFF;
+	lcd->current_alpm.value = 0;
 exit:
 	mutex_unlock(&lcd->lock);
 	return ret;
@@ -1355,167 +1325,6 @@ static ssize_t enable_fd_store(struct device *dev,
 }
 #endif
 
-#if defined(CONFIG_LCD_HMT)
-static int hmt_init(struct lcd_info *lcd)
-{
-	mutex_lock(&lcd->lock);
-	lcd->hmt_on = lcd->dsim->hmt_on = 0;
-	lcd->hmt_brightness = DEFAULT_HMT_BRIGHTNESS;
-	mutex_unlock(&lcd->lock);
-
-	return 0;
-}
-
-static int hmt_set_mode(struct lcd_info *lcd, u8 forced)
-{
-	int ret = 0;
-
-	mutex_lock(&lcd->lock);
-
-	DSI_WRITE(SEQ_TEST_KEY_ON_F0, ARRAY_SIZE(SEQ_TEST_KEY_ON_F0));
-	if (lcd->hmt_on) {
-		DSI_WRITE(SEQ_GPARA_HMT_5F, ARRAY_SIZE(SEQ_GPARA_HMT_5F));
-		DSI_WRITE(SEQ_HMT_AOR_80, ARRAY_SIZE(SEQ_HMT_AOR_80));
-		DSI_WRITE(SEQ_HMT_AID_ON, ARRAY_SIZE(SEQ_HMT_AID_ON));
-		DSI_WRITE(SEQ_HMT_LTPS, ARRAY_SIZE(SEQ_HMT_LTPS));
-		dev_info(&lcd->ld->dev, "%s: hmt on %d %d\n", __func__, lcd->hmt_on, lcd->dsim->hmt_on);
-	} else {
-		DSI_WRITE(SEQ_GPARA_HMT_5F, ARRAY_SIZE(SEQ_GPARA_HMT_5F));
-		DSI_WRITE(SEQ_HMT_AOR_00, ARRAY_SIZE(SEQ_HMT_AOR_00));
-		DSI_WRITE(SEQ_HMT_AID_OFF, ARRAY_SIZE(SEQ_HMT_AID_OFF));
-		DSI_WRITE(SEQ_HMT_LTPS, ARRAY_SIZE(SEQ_HMT_LTPS));
-		dev_info(&lcd->ld->dev, "%s: hmt off %d %d\n", __func__, lcd->hmt_on, lcd->dsim->hmt_on);
-	}
-
-	DSI_WRITE(SEQ_TEST_KEY_OFF_F0, ARRAY_SIZE(SEQ_TEST_KEY_OFF_F0));
-
-	mutex_unlock(&lcd->lock);
-
-	return ret;
-}
-
-static int dsim_panel_set_hmt_brightness(struct lcd_info *lcd, int force)
-{
-	int ret = 0;
-	unsigned char bl_reg[3] = {0, };
-
-	mutex_lock(&lcd->lock);
-
-	if (!force && lcd->state != PANEL_STATE_RESUMED) {
-		dev_info(&lcd->ld->dev, "%s: hmt brightness: %d, panel_state: %d\n", __func__, lcd->hmt_brightness, lcd->state);
-		goto exit;
-	}
-
-	bl_reg[0] = LDI_REG_BRIGHTNESS;
-	bl_reg[1] = get_bit(hmt_brightness_table[lcd->hmt_brightness], 8, 2);
-	bl_reg[2] = get_bit(hmt_brightness_table[lcd->hmt_brightness], 0, 8);
-
-	DSI_WRITE(SEQ_TEST_KEY_ON_F0, ARRAY_SIZE(SEQ_TEST_KEY_ON_F0));
-	DSI_WRITE(SEQ_HBM_OFF, ARRAY_SIZE(SEQ_HBM_OFF));
-	DSI_WRITE(bl_reg, ARRAY_SIZE(bl_reg));
-	DSI_WRITE(SEQ_ACL_OFF, ARRAY_SIZE(SEQ_ACL_OFF));
-	DSI_WRITE(SEQ_TEST_KEY_OFF_F0, ARRAY_SIZE(SEQ_TEST_KEY_OFF_F0));
-
-	dev_info(&lcd->ld->dev, "%s: brightness: %d, %d(%x %x), lx: %d\n", __func__,
-		lcd->hmt_brightness, hmt_brightness_table[lcd->hmt_brightness], bl_reg[1], bl_reg[2], lcd->lux);
-exit:
-	mutex_unlock(&lcd->lock);
-
-	return ret;
-}
-
-static int ea8076_hmt_update(struct lcd_info *lcd, u8 forced)
-{
-/*
- *	1. set hmt comaand
- *	2. set hmt brightness
- */
-
-	hmt_set_mode(lcd, forced);
-	if (lcd->hmt_on)
-		dsim_panel_set_hmt_brightness(lcd, forced);
-	else
-		dsim_panel_set_brightness(lcd, forced);
-
-	return 0;
-}
-
-static ssize_t hmt_brightness_show(struct device *dev,
-	struct device_attribute *attr, char *buf)
-{
-	struct lcd_info *lcd = dev_get_drvdata(dev);
-
-	sprintf(buf, "hmt_brightness: %d, hmt bl: %d\n", lcd->hmt_brightness, hmt_brightness_table[lcd->hmt_brightness]);
-
-	return strlen(buf);
-}
-
-static ssize_t hmt_brightness_store(struct device *dev,
-	struct device_attribute *attr, const char *buf, size_t size)
-{
-	struct lcd_info *lcd = dev_get_drvdata(dev);
-	unsigned int value;
-	int rc;
-
-	rc = kstrtouint(buf, 0, &value);
-	if (rc < 0)
-		return rc;
-
-	dev_info(&lcd->ld->dev, "++ %s: %d\n", __func__, value);
-	if (!lcd->hmt_on) {
-		dev_info(&lcd->ld->dev, "%s: hmt is not on\n", __func__);
-		return -EINVAL;
-	}
-
-	if (lcd->hmt_brightness != value) {
-		mutex_lock(&lcd->lock);
-		lcd->hmt_brightness = value;
-		mutex_unlock(&lcd->lock);
-		dsim_panel_set_hmt_brightness(lcd, 0);
-	}
-	dev_info(&lcd->ld->dev, "-- %s: %d\n", __func__, value);
-
-	return size;
-}
-
-static ssize_t hmt_on_show(struct device *dev,
-	struct device_attribute *attr, char *buf)
-{
-	struct lcd_info *lcd = dev_get_drvdata(dev);
-
-	sprintf(buf, "%u\n", lcd->hmt_on);
-
-	return strlen(buf);
-}
-
-static ssize_t hmt_on_store(struct device *dev,
-	struct device_attribute *attr, const char *buf, size_t size)
-{
-	struct lcd_info *lcd = dev_get_drvdata(dev);
-	unsigned int value;
-	int rc;
-
-	rc = kstrtouint(buf, 0, &value);
-	if (rc < 0)
-		return rc;
-
-	if (lcd->hmt_on != value) {
-		dev_info(&lcd->ld->dev, "%s: %d\n", __func__, lcd->hmt_on);
-		mutex_lock(&lcd->lock);
-		lcd->hmt_on = lcd->dsim->hmt_on = value;
-		mutex_unlock(&lcd->lock);
-		ea8076_hmt_update(lcd, 1);
-		dev_info(&lcd->ld->dev, "%s: finish %d\n", __func__, lcd->hmt_on);
-	} else
-		dev_info(&lcd->ld->dev, "%s: hmt already %s\n", __func__, value ? "on" : "off");
-
-	return size;
-}
-
-static DEVICE_ATTR(hmt_bright, 0664, hmt_brightness_show, hmt_brightness_store);
-static DEVICE_ATTR(hmt_on, 0664, hmt_on_show, hmt_on_store);
-#endif
-
 #if defined(CONFIG_DISPLAY_USE_INFO)
 /*
  * HW PARAM LOGGING SYSFS NODE
@@ -1580,38 +1389,50 @@ static DEVICE_ATTR(dpui_dbg, 0660, dpui_dbg_show, dpui_dbg_store);
 
 #if defined(CONFIG_EXYNOS_DOZE)
 #if defined(CONFIG_SEC_FACTORY)
-static ssize_t alpm_doze_store(struct device *dev,
+static ssize_t alpm_store(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t size)
 {
 	struct lcd_info *lcd = dev_get_drvdata(dev);
 	struct dsim_device *dsim = lcd->dsim;
 	struct decon_device *decon = get_decon_drvdata(0);
-	unsigned int value;
+	union lpm_info lpm = {0, };
+	unsigned int value = 0;
 	int ret;
 
 	ret = kstrtouint(buf, 0, &value);
 	if (ret < 0)
 		return ret;
 
-	dev_info(&lcd->ld->dev, "%s: %d, %d, %d, %d\n", __func__, value, lcd->doze_state, lcd->current_alpm, lcd->alpm);
+	dev_info(&lcd->ld->dev, "%s: %06x, lpm: %06x(%06x)\n", __func__,
+		value, lcd->current_alpm.value, lcd->alpm.value);
 
 	if (lcd->state != PANEL_STATE_RESUMED) {
 		dev_info(&lcd->ld->dev, "%s: panel state is %d\n", __func__, lcd->state);
 		return -EINVAL;
 	}
 
-	if (value >= ALPM_MODE_MAX) {
-		dev_info(&lcd->ld->dev, "%s: undefined alpm mode: %d\n", __func__, value);
+	lpm.ver = get_bit(value, 16, 8);
+	lpm.mode = get_bit(value, 0, 8);
+
+	if (!lpm.ver && lpm.mode >= ALPM_MODE_MAX) {
+		dev_info(&lcd->ld->dev, "%s: undefined lpm value: %x\n", __func__, value);
 		return -EINVAL;
 	}
 
+	if (lpm.ver && lpm.mode >= AOD_MODE_MAX) {
+		dev_info(&lcd->ld->dev, "%s: undefined lpm value: %x\n", __func__, value);
+		return -EINVAL;
+	}
+
+	lpm.state = (lpm.ver && lpm.mode) ? lpm_brightness_table[lcd->bd->props.brightness] : lpm_old_table[lpm.mode];
+
 	mutex_lock(&lcd->lock);
 	lcd->prev_alpm = lcd->alpm;
-	lcd->alpm = value;
+	lcd->alpm = lpm;
 	mutex_unlock(&lcd->lock);
 
 	decon_abd_pin_enable(decon, 0);
-	switch (value) {
+	switch (lpm.mode) {
 	case ALPM_OFF:
 		if (lcd->prev_brightness) {
 			mutex_lock(&lcd->lock);
@@ -1620,27 +1441,30 @@ static ssize_t alpm_doze_store(struct device *dev,
 			mutex_unlock(&lcd->lock);
 		}
 		mutex_lock(&decon->lock);
-		call_panel_ops(dsim, doze_exit, dsim);
+		call_panel_ops(dsim, displayon, dsim);	/* for exitalpm */
 		mutex_unlock(&decon->lock);
 		usleep_range(17000, 18000);
-		call_panel_ops(dsim, displayon, dsim);
+		mutex_lock(&lcd->lock);
 		ea8076_displayon(lcd);
+		mutex_unlock(&lcd->lock);
 		break;
 	case ALPM_ON_LOW:
 	case HLPM_ON_LOW:
 	case ALPM_ON_HIGH:
 	case HLPM_ON_HIGH:
-		if (lcd->prev_alpm == ALPM_OFF) {
+		if (lcd->prev_alpm.mode == ALPM_OFF) {
 			mutex_lock(&lcd->lock);
 			lcd->prev_brightness = lcd->bd->props.brightness;
-			lcd->bd->props.brightness = 0;
 			mutex_unlock(&lcd->lock);
 		}
 		mutex_lock(&decon->lock);
+		lcd->bd->props.brightness = (value <= HLPM_ON_LOW) ? 0 : UI_MAX_BRIGHTNESS;
 		call_panel_ops(dsim, doze, dsim);
 		mutex_unlock(&decon->lock);
 		usleep_range(17000, 18000);
+		mutex_lock(&lcd->lock);
 		ea8076_displayon(lcd);
+		mutex_unlock(&lcd->lock);
 		break;
 	}
 	decon_abd_pin_enable(decon, 1);
@@ -1648,54 +1472,67 @@ static ssize_t alpm_doze_store(struct device *dev,
 	return size;
 }
 #else
-static ssize_t alpm_doze_store(struct device *dev,
+static ssize_t alpm_store(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t size)
 {
 	struct lcd_info *lcd = dev_get_drvdata(dev);
 	struct dsim_device *dsim = lcd->dsim;
 	struct decon_device *decon = get_decon_drvdata(0);
-	unsigned int value;
+	union lpm_info lpm = {0, };
+	unsigned int value = 0;
 	int ret;
 
 	ret = kstrtouint(buf, 0, &value);
 	if (ret < 0)
 		return ret;
 
-	dev_info(&lcd->ld->dev, "%s: %d, %d, %d, %d\n", __func__, value, lcd->doze_state, lcd->current_alpm, lcd->alpm);
+	dev_info(&lcd->ld->dev, "%s: %06x, lpm: %06x(%06x)\n", __func__,
+		value, lcd->current_alpm.value, lcd->alpm.value);
 
-	if (value >= ALPM_MODE_MAX) {
-		dev_info(&lcd->ld->dev, "%s: undefined alpm mode: %d\n", __func__, value);
+	lpm.ver = get_bit(value, 16, 8);
+	lpm.mode = get_bit(value, 0, 8);
+
+	if (!lpm.ver && lpm.mode >= ALPM_MODE_MAX) {
+		dev_info(&lcd->ld->dev, "%s: undefined lpm value: %x\n", __func__, value);
 		return -EINVAL;
 	}
 
-	mutex_lock(&decon->lock);
-
-	if (lcd->alpm != value) {
-		mutex_lock(&lcd->lock);
-		lcd->alpm = value;
-		mutex_unlock(&lcd->lock);
-
-		if (dsim->state == DSIM_STATE_DOZE)
-			call_panel_ops(dsim, doze, dsim);
+	if (lpm.ver && lpm.mode >= AOD_MODE_MAX) {
+		dev_info(&lcd->ld->dev, "%s: undefined lpm value: %x\n", __func__, value);
+		return -EINVAL;
 	}
 
+	lpm.state = (lpm.ver && lpm.mode) ? lpm_brightness_table[lcd->bd->props.brightness] : lpm_old_table[lpm.mode];
+
+	if (lcd->alpm.value == lpm.value && lcd->current_alpm.value == lpm.value) {
+		dev_info(&lcd->ld->dev, "%s: unchanged lpm value: %x\n", __func__, lpm.value);
+		return size;
+	}
+
+	mutex_lock(&decon->lock);
+	mutex_lock(&lcd->lock);
+	lcd->alpm = lpm;
+	mutex_unlock(&lcd->lock);
+
+	if (dsim->state == DSIM_STATE_DOZE)
+		call_panel_ops(dsim, doze, dsim);
 	mutex_unlock(&decon->lock);
 
 	return size;
 }
 #endif
 
-static ssize_t alpm_doze_show(struct device *dev,
+static ssize_t alpm_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
 	struct lcd_info *lcd = dev_get_drvdata(dev);
 
-	sprintf(buf, "%d, %d\n", lcd->current_alpm, lcd->alpm);
+	sprintf(buf, "%06x\n", lcd->current_alpm.value);
 
 	return strlen(buf);
 }
 
-static DEVICE_ATTR(alpm, 0664, alpm_doze_show, alpm_doze_store);
+static DEVICE_ATTR(alpm, 0664, alpm_show, alpm_store);
 #endif
 
 #if defined(CONFIG_SUPPORT_MASK_LAYER)
@@ -1760,6 +1597,7 @@ static DEVICE_ATTR(lux, 0644, lux_show, lux_store);
 static DEVICE_ATTR(octa_id, 0444, octa_id_show, NULL);
 static DEVICE_ATTR(SVC_OCTA, 0444, cell_id_show, NULL);
 static DEVICE_ATTR(SVC_OCTA_CHIPID, 0444, octa_id_show, NULL);
+static DEVICE_ATTR(SVC_OCTA_DDI_CHIPID, 0444, manufacture_code_show, NULL);
 static DEVICE_ATTR(xtalk_mode, 0220, NULL, xtalk_mode_store);
 #if defined(CONFIG_SEC_FACTORY)
 static DEVICE_ATTR(enable_fd, 0220, NULL, enable_fd_store);
@@ -1783,10 +1621,6 @@ static struct attribute *lcd_sysfs_attributes[] = {
 	&dev_attr_xtalk_mode.attr,
 #if defined(CONFIG_SEC_FACTORY)
 	&dev_attr_enable_fd.attr,
-#endif
-#if defined(CONFIG_LCD_HMT)
-	&dev_attr_hmt_on.attr,
-	&dev_attr_hmt_bright.attr,
 #endif
 #if defined(CONFIG_DISPLAY_USE_INFO)
 	&dev_attr_dpui.attr,
@@ -1834,6 +1668,7 @@ static void lcd_init_svc(struct lcd_info *lcd)
 
 	device_create_file(dev, &dev_attr_SVC_OCTA);
 	device_create_file(dev, &dev_attr_SVC_OCTA_CHIPID);
+	device_create_file(dev, &dev_attr_SVC_OCTA_DDI_CHIPID);
 
 	if (kn)
 		kernfs_put(kn);
@@ -1950,23 +1785,19 @@ static int dsim_panel_displayon(struct dsim_device *dsim)
 
 	dev_info(&lcd->ld->dev, "+ %s: %d\n", __func__, lcd->state);
 
-#if defined(CONFIG_EXYNOS_DOZE)
-	if (lcd->doze_state)
-		call_panel_ops(dsim, doze_exit, dsim);
-	else if (lcd->state == PANEL_STATE_SUSPENED) {
-		ea8076_init(lcd);
-
-		mutex_lock(&lcd->lock);
-		lcd->state = PANEL_STATE_RESUMED;
-		mutex_unlock(&lcd->lock);
-	}
-#else
 	if (lcd->state == PANEL_STATE_SUSPENED) {
 		ea8076_init(lcd);
 
 		mutex_lock(&lcd->lock);
 		lcd->state = PANEL_STATE_RESUMED;
 		mutex_unlock(&lcd->lock);
+	}
+
+#if defined(CONFIG_EXYNOS_DOZE)
+	if (lcd->current_alpm.state) {
+		ea8076_exitalpm(lcd);
+
+		dsim_panel_set_brightness(lcd, 1);
 	}
 #endif
 	dev_info(&lcd->ld->dev, "- %s: %d, %d\n", __func__, lcd->state, lcd->connected);
@@ -2012,40 +1843,27 @@ static int dsim_panel_enteralpm(struct dsim_device *dsim)
 
 	ea8076_enteralpm(lcd);
 
-	mutex_lock(&lcd->lock);
-	lcd->doze_state = 1;
-	mutex_unlock(&lcd->lock);
-
 	dev_info(&lcd->ld->dev, "- %s: %d, %d\n", __func__, lcd->state, lcd->connected);
 
 	return 0;
 }
+#endif
 
-static int dsim_panel_exitalpm(struct dsim_device *dsim)
+#if defined(CONFIG_LOGGING_BIGDATA_BUG)
+static unsigned int dsim_get_panel_bigdata(struct dsim_device *dsim)
 {
 	struct lcd_info *lcd = dsim->priv.par;
+	unsigned int val = 0;
 
-	dev_info(&lcd->ld->dev, "+ %s: %d\n", __func__, lcd->state);
+	lcd->rddpm = 0xff;
+	lcd->rddsm = 0xff;
 
-	if (lcd->state == PANEL_STATE_SUSPENED) {
-		ea8076_init(lcd);
+	ea8076_read_rddpm(lcd);
+	ea8076_read_rddsm(lcd);
 
-		mutex_lock(&lcd->lock);
-		lcd->state = PANEL_STATE_RESUMED;
-		mutex_unlock(&lcd->lock);
-	}
+	val = (lcd->rddpm  << 8) | lcd->rddsm;
 
-	ea8076_exitalpm(lcd);
-
-	mutex_lock(&lcd->lock);
-	lcd->doze_state = 0;
-	mutex_unlock(&lcd->lock);
-
-	dsim_panel_set_brightness(lcd, 1);
-
-	dev_info(&lcd->ld->dev, "- %s: %d, %d\n", __func__, lcd->state, lcd->connected);
-
-	return 0;
+	return val;
 }
 #endif
 
@@ -2122,18 +1940,24 @@ struct dsim_lcd_driver ea8076_mipi_lcd_driver = {
 	.suspend	= dsim_panel_suspend,
 #if defined(CONFIG_EXYNOS_DOZE)
 	.doze		= dsim_panel_enteralpm,
-	.doze_exit	= dsim_panel_exitalpm,
+#endif
+#if defined(CONFIG_LOGGING_BIGDATA_BUG)
+	.get_buginfo	= dsim_get_panel_bigdata,
 #endif
 #if defined(CONFIG_SUPPORT_MASK_LAYER)
 	.mask_brightness	= dsim_panel_mask_brightness,
 #endif
 };
+__XX_ADD_LCD_DRIVER(ea8076_mipi_lcd_driver);
 
 static void panel_conn_uevent(struct lcd_info *lcd)
 {
 	char *uevent_conn_str[3] = {"CONNECTOR_NAME=UB_CONNECT", "CONNECTOR_TYPE=HIGH_LEVEL", NULL};
 
 	if (!IS_ENABLED(CONFIG_SEC_FACTORY))
+		return;
+
+	if (!lcd->conn_det_enable)
 		return;
 
 	kobject_uevent_env(&lcd->ld->dev.kobj, KOBJ_CHANGE, uevent_conn_str);
@@ -2150,7 +1974,7 @@ static void panel_conn_work(struct work_struct *work)
 	panel_conn_uevent(lcd);
 }
 
-irqreturn_t panel_conn_det_handler(int irq, void *dev_id)
+static irqreturn_t panel_conn_det_handler(int irq, void *dev_id)
 {
 	struct lcd_info *lcd = (struct lcd_info *)dev_id;
 
@@ -2256,39 +2080,34 @@ static void panel_conn_register(struct lcd_info *lcd)
 	decon_abd_pin_register_handler(gpio_to_irq(gpio), panel_conn_det_handler, lcd);
 }
 
-static int compare_with_name(struct device *dev, void *data)
+static int match_dev_name(struct device *dev, void *data)
 {
 	const char *keyword = data;
 
 	return dev_name(dev) ? !!strstr(dev_name(dev), keyword) : 0;
 }
 
-static struct device *find_platform_device_by_keyword(const char *keyword)
-{
-	return bus_find_device(&platform_bus_type, NULL, (void *)keyword, compare_with_name);
-}
-
 static struct device *find_lcd_device(void)
 {
-	struct device *parent = NULL;
+	struct platform_device *pdev = NULL;
 	struct device *dev = NULL;
 
-	parent = find_platform_device_by_keyword("dsim");
-
-	if (!parent) {
-		dsim_info("bus_find_device fail\n");
-		return parent;
+	pdev = of_find_dsim_platform_device();
+	if (!pdev) {
+		dsim_info("%s: of_find_device_by_node fail\n", __func__);
+		return NULL;
 	}
 
-	dev = device_find_child(parent, "panel", compare_with_name);
-
-	if (parent)
-		put_device(parent);
+	dev = device_find_child(&pdev->dev, "panel", match_dev_name);
+	if (!dev) {
+		dsim_info("%s: device_find_child fail\n", __func__);
+		return NULL;
+	}
 
 	if (dev)
 		put_device(dev);
 
-	return dev ? dev : parent;
+	return dev;
 }
 
 static int __init panel_conn_init(void)

@@ -635,12 +635,19 @@ int sensor_imx616_cis_mode_change(struct v4l2_subdev *subdev, u32 mode)
 {
 	int ret = 0;
 	struct fimc_is_cis *cis = NULL;
-
+	struct i2c_client *client = NULL;
+	u16 aehist_linear_threth[] = { VAL(AEHIST_LINEAR_LO_THRETH),
+				VAL(AEHIST_LINEAR_UP_THRETH) };
+	u16 aehist_log_threth[] = { VAL(AEHIST_LOG_LO_THRETH),
+				VAL(AEHIST_LOG_UP_THRETH) };
 	FIMC_BUG(!subdev);
 
 	cis = (struct fimc_is_cis *)v4l2_get_subdevdata(subdev);
 	FIMC_BUG(!cis);
 	FIMC_BUG(!cis->cis_data);
+
+	client = cis->client;
+	CHECK_ERR_RET(!client, -EINVAL, "client is NULL");
 
 	if (mode > sensor_imx616_max_setfile_num) {
 		err("invalid mode(%d)!!", mode);
@@ -665,6 +672,22 @@ int sensor_imx616_cis_mode_change(struct v4l2_subdev *subdev, u32 mode)
 	ret = sensor_cis_set_registers(subdev, sensor_imx616_setfiles[mode], sensor_imx616_setfile_sizes[mode]);
 	CHECK_ERR_GOTO(ret < 0, p_i2c_err, "sensor_imx616_set_registers fail!!");
 
+	/* Set AEHIST manual */
+	if (IS_3DHDR_MODE(cis)) {
+		info("[imx616] set AEHIST manual\n");
+		ret = fimc_is_sensor_write8(client, REG(AEHIST_LN_AUTO_THRETH), 0x0);
+		CHECK_GOTO(ret < 0, p_i2c_err);
+		ret = fimc_is_sensor_write16_array(client, REG(AEHIST_LN_THRETH_START),
+					aehist_linear_threth, ARRAY_SIZE(aehist_linear_threth));
+		CHECK_ERR_GOTO(ret < 0, p_i2c_err, "failed to set linear");
+
+		ret = fimc_is_sensor_write8(client, REG(AEHIST_LOG_AUTO_THRETH), 0x0);
+		CHECK_GOTO(ret < 0, p_i2c_err);
+		ret = fimc_is_sensor_write16_array(client, REG(AEHIST_LOG_THRETH_START),
+					aehist_log_threth, ARRAY_SIZE(aehist_log_threth));
+		CHECK_ERR_GOTO(ret < 0, p_i2c_err, "failed to set log");
+	}
+	
 	dbg_sensor(1, "[%s] mode changed(%d)\n", __func__, mode);
 
 p_i2c_err:
@@ -2243,6 +2266,222 @@ p_i2c_err:
 #endif
 }
 
+#ifdef TEMP_3HDR /* FixMe */
+int sensor_imx616_cis_set_3hdr_tone(struct v4l2_subdev *subdev, struct sensor_imx_3hdr_tone_control tc)
+{
+	int i, ret = 0;
+	int hold = 0;
+	struct fimc_is_cis *cis;
+	struct i2c_client *client;
+	cis_shared_data *cis_data;
+	u8 nr_transit_frames[4] = {0, };
+	u16 blend2_addr[5] = { REG(BLD2_TC_RATIO_1), REG(BLD2_TC_RATIO_2), 
+				REG(BLD2_TC_RATIO_3), REG(BLD2_TC_RATIO_4),
+				REG(BLD2_TC_RATIO_5) };
+	u16 blend1_ratio, blend2_ratio, blend3_ratio;
+	u16 hdrtc_ratio[5] = {0, };
+	u8 blend3_ratio_1_5[5] = {0, };
+#ifdef DEBUG_SENSOR_TIME
+	struct timeval st, end;
+	do_gettimeofday(&st);
+#endif
+
+	BUG_ON(!subdev);
+
+	cis = (struct fimc_is_cis *)v4l2_get_subdevdata(subdev);
+
+	BUG_ON(!cis);
+	BUG_ON(!cis->cis_data);
+
+	cis_data = cis->cis_data;
+
+	client = cis->client;
+	CHECK_ERR_RET(!client, -EINVAL, "client is NULL");
+	CHECK_ERR_RET(!IS_3DHDR_MODE(cis), 0, "can not set in none-3hdr");
+
+	dbg_sensor(1, "[MOD:D:%d] %s(vsync cnt %d): gmtc2 on(%d), gmtc2 ratio %#x, "
+		"(%#x, %#x) - (%#x, %#x), manual tc ratio %#x, ltc ratio %#x, "
+		"hdr_tc1 %#x, hdr_tc2 %#x, hdr_tc3 %#x, hdr_tc4 %#x, hdr_tc5 %#x\n",
+		cis->id, __func__, cis_data->sen_vsync_count, tc.gmt_tc2_enable, tc.gmt_tc2_ratio,
+		tc.manual21_frame_p1, tc.manual21_frame_p2, tc.manual12_frame_p1, tc.manual12_frame_p2,
+		tc.manual_tc_ratio, tc.ltc_ratio, tc.tc_hdr_tc_ratio_1, tc.tc_hdr_tc_ratio_2, tc.tc_hdr_tc_ratio_3,
+		tc.tc_hdr_tc_ratio_4, tc.tc_hdr_tc_ratio_5);
+
+
+	info("%s: gmtc2 on(%d), gmtc2 ratio %#x, (%#x, %#x) - (%#x, %#x), manual tc ratio %#x, ltc ratio %#x\n",
+		__func__, tc.gmt_tc2_enable, tc.gmt_tc2_ratio,
+		tc.manual21_frame_p1, tc.manual21_frame_p2, tc.manual12_frame_p1, tc.manual12_frame_p2,
+		tc.manual_tc_ratio, tc.ltc_ratio); //for debug
+
+	I2C_MUTEX_LOCK(cis->i2c_lock);
+	hold = sensor_imx616_cis_group_param_hold_func(subdev, 0x01);
+	if (hold < 0) {
+		ret = hold;
+		goto p_i2c_err;
+	}
+
+	/* Blend1 */
+	ret = fimc_is_sensor_write8(client, REG(BLD1_GMTC2_EN), tc.gmt_tc2_enable ? 0x01 : 0x00);
+	CHECK_GOTO(ret < 0, p_i2c_err);	
+
+	blend1_ratio = tc.gmt_tc2_ratio > 0x10 ? 0x10 : tc.gmt_tc2_ratio;
+	ret = fimc_is_sensor_write8(client, REG(BLD1_GMTC2_RATIO), blend1_ratio);
+	CHECK_GOTO(ret < 0, p_i2c_err);
+
+	nr_transit_frames[0] = tc.manual21_frame_p1 & 0x7F;
+	nr_transit_frames[1] = tc.manual21_frame_p2 & 0x7F;
+	nr_transit_frames[2] = tc.manual12_frame_p1 & 0x7F;
+	nr_transit_frames[3] = tc.manual12_frame_p2 & 0x7F;
+
+	ret = fimc_is_sensor_write8_array(client, REG(BLD1_GMTC_NR_TRANSIT_FRM),
+					nr_transit_frames, ARRAY_SIZE(nr_transit_frames));
+	CHECK_GOTO(ret < 0, p_i2c_err);
+
+	/* Blend2 */
+	blend2_ratio = tc.manual_tc_ratio > 0x10 ? 0x10 : tc.manual_tc_ratio;
+	for (i = 0; i < ARRAY_SIZE(blend2_addr); i++) {
+		ret = fimc_is_sensor_write8(client, blend2_addr[i], blend2_ratio);
+		CHECK_GOTO(ret < 0, p_i2c_err);
+	}
+
+	/* Blend3 */
+	blend3_ratio = tc.ltc_ratio > 0x20 ? 0x20 : tc.ltc_ratio;
+	for (i = 0; i < ARRAY_SIZE(blend3_ratio_1_5); i++) {
+		blend3_ratio_1_5[i] = blend3_ratio;
+	}
+
+	ret = fimc_is_sensor_write8_array(client, REG(BLD3_LTC_RATIO_START),
+					blend3_ratio_1_5, ARRAY_SIZE(blend3_ratio_1_5));
+	ret |= fimc_is_sensor_write8(client, REG(BLD3_LTC_RATIO_6), blend3_ratio);
+	CHECK_GOTO(ret < 0, p_i2c_err);
+
+	if (tc.tc_hdr_tc_ratio_4 != tc.tc_hdr_tc_ratio_5) {
+		/* DDK needs to be checked */
+		err("not same: hdr_tc4 %d, hdr_tc5 %d", tc.tc_hdr_tc_ratio_4, tc.tc_hdr_tc_ratio_5);
+	}
+
+	/* Blend4 */
+	i = 0;
+	hdrtc_ratio[i++] = tc.tc_hdr_tc_ratio_1 > 0x100 ? 0x100 : tc.tc_hdr_tc_ratio_1;
+	hdrtc_ratio[i++] = tc.tc_hdr_tc_ratio_2 > 0x100 ? 0x100 : tc.tc_hdr_tc_ratio_2;
+	hdrtc_ratio[i++] = tc.tc_hdr_tc_ratio_3 > 0x100 ? 0x100 : tc.tc_hdr_tc_ratio_3;
+	hdrtc_ratio[i++] = tc.tc_hdr_tc_ratio_4 > 0x100 ? 0x100 : tc.tc_hdr_tc_ratio_4;
+	hdrtc_ratio[i] = tc.tc_hdr_tc_ratio_5 > 0x100 ? 0x100 : tc.tc_hdr_tc_ratio_5;
+
+	/*
+	i = 0;
+	hdrtc_addr[i++] = REG(BLD4_HDR_TC_RATIO1_UP);
+	hdrtc_addr[i++] = REG(BLD4_HDR_TC_RATIO2_UP);
+	hdrtc_addr[i++] = REG(BLD4_HDR_TC_RATIO3_UP);
+	hdrtc_addr[i++] = REG(BLD4_HDR_TC_RATIO4_UP);
+	hdrtc_addr[i] = REG(BLD4_HDR_TC_RATIO5_UP); */
+
+	ret = fimc_is_sensor_write16_array(client, REG(BLD4_HDR_TC_RATIO_START),
+					hdrtc_ratio, ARRAY_SIZE(hdrtc_ratio));
+	CHECK_GOTO(ret < 0, p_i2c_err);
+
+	dbg_sensor(1, "[MOD:D:%d] %s(vsync cnt %d): gmtc2 on(%d), gmtc2 ratio %#x, "
+		"(%#x, %#x) - (%#x, %#x), manual tc ratio %#x, ltc ratio %#x, "
+		"hdr_tc1 %#x, hdr_tc2 %#x, hdr_tc3 %#x, hdr_tc4 %#x, hdr_tc5 %#x\n",
+		cis->id, __func__, cis_data->sen_vsync_count, tc.gmt_tc2_enable, blend1_ratio,
+		nr_transit_frames[0], nr_transit_frames[1], nr_transit_frames[2], nr_transit_frames[3],
+		blend2_ratio, blend3_ratio, hdrtc_ratio[0], hdrtc_ratio[1], hdrtc_ratio[2],
+		hdrtc_ratio[3], hdrtc_ratio[4]);
+
+#ifdef DEBUG_SENSOR_TIME
+	do_gettimeofday(&end);
+	dbg_sensor(1, "[%s] time %lu us\n", __func__, (end.tv_sec - st.tv_sec)*1000000 + (end.tv_usec - st.tv_usec));
+#endif
+
+p_i2c_err:
+	if (hold > 0) {
+		hold = sensor_imx616_cis_group_param_hold_func(subdev, 0x00);
+		if (hold < 0)
+			ret = hold;
+	}
+	I2C_MUTEX_UNLOCK(cis->i2c_lock);
+
+	return ret;
+}
+#endif
+
+#ifdef TEMP_3HDR /* FixMe */
+int sensor_imx616_cis_set_3hdr_ev(struct v4l2_subdev *subdev, struct sensor_imx_3hdr_ev_control ev_control)
+{
+	int ret = 0;
+	int hold = 0;
+	struct fimc_is_cis *cis;
+	struct i2c_client *client;
+	cis_shared_data *cis_data;
+	int pgain = 0, ngain = 0;
+
+#ifdef DEBUG_SENSOR_TIME
+	struct timeval st, end;
+	do_gettimeofday(&st);
+#endif
+
+	BUG_ON(!subdev);
+
+	cis = (struct fimc_is_cis *)v4l2_get_subdevdata(subdev);
+
+	BUG_ON(!cis);
+	BUG_ON(!cis->cis_data);
+
+	cis_data = cis->cis_data;
+
+	client = cis->client;
+	CHECK_ERR_RET(!client, -EINVAL, "client is NULL");
+	CHECK_ERR_RET(!IS_3DHDR_MODE(cis), 0, "can not set in none-3hdr");
+
+	dbg_sensor(1, "[MOD:D:%d] %s(vsync cnt %d): evc_pgain %#x, evc_ngain %#x\n",
+		cis->id, __func__, cis_data->sen_vsync_count, ev_control.evc_pgain, ev_control.evc_ngain);
+
+	info("%s: evc_pgain %#x, evc_ngain %#x\n", __func__, ev_control.evc_pgain, ev_control.evc_ngain); // for debug
+
+	if (ev_control.evc_pgain && ev_control.evc_ngain) {
+		err("invalid ev control. pgain %d, ngain %d", ev_control.evc_pgain, ev_control.evc_ngain);
+		return -EINVAL;
+	}
+
+	pgain = ev_control.evc_pgain > 0x10 ? 0x10: ev_control.evc_pgain;
+	ngain = ev_control.evc_ngain > 0x10 ? 0x10: ev_control.evc_ngain;
+
+	I2C_MUTEX_LOCK(cis->i2c_lock);
+	hold = sensor_imx616_cis_group_param_hold_func(subdev, 0x01);
+	if (hold < 0) {
+		ret = hold;
+		goto p_i2c_err;
+	}
+
+	/* To do work */
+	ret = fimc_is_sensor_write8(client, REG(EVC_PGAIN), pgain);
+	CHECK_GOTO(ret < 0, p_i2c_err);
+
+	ret = fimc_is_sensor_write8(client, REG(EVC_NGAIN), ngain);
+	CHECK_GOTO(ret < 0, p_i2c_err);
+	
+	if (pgain != ev_control.evc_pgain || ngain != ev_control.evc_ngain) {
+		err("pgain %d -> %d, ngain %d -> %d", ev_control.evc_pgain, pgain,
+						ev_control.evc_ngain, ngain);
+	}
+
+#ifdef DEBUG_SENSOR_TIME
+	do_gettimeofday(&end);
+	dbg_sensor(1, "[%s] time %lu us\n", __func__, (end.tv_sec - st.tv_sec)*1000000 + (end.tv_usec - st.tv_usec));
+#endif
+
+p_i2c_err:
+	if (hold > 0) {
+		hold = sensor_imx616_cis_group_param_hold_func(subdev, 0x00);
+		if (hold < 0)
+			ret = hold;
+	}
+	I2C_MUTEX_UNLOCK(cis->i2c_lock);
+
+	return ret;
+}
+#endif
+
 static struct fimc_is_cis_ops cis_ops_imx616 = {
 	.cis_init = sensor_imx616_cis_init,
 	.cis_log_status = sensor_imx616_cis_log_status,
@@ -2277,6 +2516,8 @@ static struct fimc_is_cis_ops cis_ops_imx616 = {
 	.cis_check_wdr_mode = sensor_imx616_cis_check_wdr_mode,
 #ifdef TEMP_3HDR
 	.cis_init_3hdr_lsc_table = sensor_imx616_cis_init_3hdr_lsc_table,
+	.cis_set_tone_stat = sensor_imx616_cis_set_3hdr_tone,
+	.cis_set_ev_stat = sensor_imx616_cis_set_3hdr_ev,
 #endif
 };
 

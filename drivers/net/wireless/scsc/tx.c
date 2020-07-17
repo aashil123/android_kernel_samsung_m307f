@@ -1,6 +1,6 @@
 /******************************************************************************
  *
- * Copyright (c) 2012 - 2018 Samsung Electronics Co., Ltd. All rights reserved
+ * Copyright (c) 2012 - 2019 Samsung Electronics Co., Ltd. All rights reserved
  *
  *****************************************************************************/
 
@@ -17,7 +17,9 @@ static bool msdu_enable = true;
 module_param(msdu_enable, bool, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(msdu_enable, "MSDU frame format, Y: enable (default), N: disable");
 
+#ifdef CONFIG_ANDROID
 #include "scsc_wifilogger_rings.h"
+#endif
 
 /**
  * Needed to get HIP4_DAT)SLOTS...should be part
@@ -74,7 +76,9 @@ static int slsi_tx_eapol(struct slsi_dev *sdev, struct net_device *dev, struct s
 		 *  In M4 packet,
 		 *   - MIC bit set in key info
 		 *   - Key type bit set in key info (pairwise=1, Group=0)
-		 *   - Key Data Length would be 0
+		 *   - ACK bit will not be set
+		 *   - Secure bit will be set in key type RSN (WPA2/WPA3 Personal/WPA3 Enterprise)
+		 *   - Key Data length check for Zero is for WPA as Secure bit will not be set
 		 */
 		if ((skb->len - sizeof(struct ethhdr)) >= 99)
 			eapol = skb->data + sizeof(struct ethhdr);
@@ -83,9 +87,10 @@ static int slsi_tx_eapol(struct slsi_dev *sdev, struct net_device *dev, struct s
 
 			if ((eapol[SLSI_EAPOL_TYPE_POS] == SLSI_EAPOL_TYPE_RSN_KEY || eapol[SLSI_EAPOL_TYPE_POS] == SLSI_EAPOL_TYPE_WPA_KEY) &&
 			    (eapol[SLSI_EAPOL_KEY_INFO_LOWER_BYTE_POS] & SLSI_EAPOL_KEY_INFO_KEY_TYPE_BIT_IN_LOWER_BYTE) &&
+			    (!(eapol[SLSI_EAPOL_KEY_INFO_LOWER_BYTE_POS] & SLSI_EAPOL_KEY_INFO_ACK_BIT_IN_LOWER_BYTE)) &&
 			    (eapol[SLSI_EAPOL_KEY_INFO_HIGHER_BYTE_POS] & SLSI_EAPOL_KEY_INFO_MIC_BIT_IN_HIGHER_BYTE) &&
-			    (eapol[SLSI_EAPOL_KEY_DATA_LENGTH_HIGHER_BYTE_POS] == 0) &&
-			    (eapol[SLSI_EAPOL_KEY_DATA_LENGTH_LOWER_BYTE_POS] == 0)) {
+			    ((eapol[SLSI_EAPOL_KEY_INFO_HIGHER_BYTE_POS] & SLSI_EAPOL_KEY_INFO_SECURE_BIT_IN_HIGHER_BYTE) ||
+			    ((eapol[SLSI_EAPOL_KEY_DATA_LENGTH_HIGHER_BYTE_POS] == 0) && (eapol[SLSI_EAPOL_KEY_DATA_LENGTH_LOWER_BYTE_POS] == 0)))) {
 				msg_type = FAPI_MESSAGETYPE_EAPOL_KEY_M4;
 				dwell_time = 0;
 			}
@@ -154,7 +159,7 @@ int slsi_tx_data(struct slsi_dev *sdev, struct net_device *dev, struct sk_buff *
 	enum slsi_traffic_q tq;
 	u32 dwell_time = 0;
 	u8 *frame;
-	u32 arp_opcode;
+	u16 arp_opcode;
 	u32 dhcp_message_type = SLSI_DHCP_MESSAGE_TYPE_INVALID;
 
 	if (slsi_is_test_mode_enabled()) {
@@ -164,11 +169,16 @@ int slsi_tx_data(struct slsi_dev *sdev, struct net_device *dev, struct sk_buff *
 		SLSI_NET_WARN(dev, "WlanLite: NOT supported\n");
 		return -EOPNOTSUPP;
 	}
-
-	if (!ndev_vif->activated) {
-		SLSI_NET_WARN(dev, "vif NOT activated\n");
-		return -EINVAL;
+#ifdef CONFIG_SCSC_WIFI_NAN_ENABLE
+	if (ndev_vif->ifnum < SLSI_NAN_DATA_IFINDEX_START) {
+#endif
+		if (!ndev_vif->activated) {
+			SLSI_NET_WARN(dev, "vif NOT activated\n");
+			return -EINVAL;
+		}
+#ifdef CONFIG_SCSC_WIFI_NAN_ENABLE
 	}
+#endif
 
 	if ((ndev_vif->vif_type == FAPI_VIFTYPE_AP) && !ndev_vif->peer_sta_records) {
 		SLSI_NET_DBG3(dev, SLSI_TX, "AP with no STAs associated, drop Tx frame\n");
@@ -194,9 +204,15 @@ int slsi_tx_data(struct slsi_dev *sdev, struct net_device *dev, struct sk_buff *
 		case ETH_P_ARP:
 			SLSI_NET_DBG2(dev, SLSI_MLME, "transmit ARP frame from SLSI_NETIF_Q_PRIORITY\n");
 			frame = skb->data + sizeof(struct ethhdr);
-			arp_opcode = frame[6] << 8 | frame[7];
-			if ((arp_opcode == 1) &&
-			    memcmp(&frame[14], &frame[24], 4)) { /*opcode 1: ARP request(except gratuitous ARP)*/
+			arp_opcode = frame[SLSI_ARP_OPCODE_OFFSET] << 8 | frame[SLSI_ARP_OPCODE_OFFSET + 1];
+			if ((arp_opcode == SLSI_ARP_REQUEST_OPCODE) &&
+			    !SLSI_IS_GRATUITOUS_ARP(frame)) {
+#ifdef CONFIG_SCSC_WLAN_STA_ENHANCED_ARP_DETECT
+				if (ndev_vif->enhanced_arp_detect_enabled &&
+				    !memcmp(&frame[SLSI_ARP_DEST_IP_ADDR_OFFSET], &ndev_vif->target_ip_addr, 4)) {
+					ndev_vif->enhanced_arp_stats.arp_req_count_from_netdev++;
+				}
+#endif
 				dwell_time = sdev->fw_dwell_time;
 			}
 			return slsi_mlme_send_frame_data(sdev, dev, skb, FAPI_MESSAGETYPE_ARP, 0, dwell_time, 0);
@@ -287,16 +303,18 @@ int slsi_tx_data(struct slsi_dev *sdev, struct net_device *dev, struct sk_buff *
 	/* colour is defined as: */
 	/* u16 register bits:
 	 * 0      - do not use
-	 * [2:1]  - vif
-	 * [7:3]  - peer_index
+	 * [3:1]  - vif
+	 * [7:4]  - peer_index
 	 * [10:8] - ac queue
 	 */
 	cb->colour = (slsi_frame_priority_to_ac_queue(skb->priority) << 8) |
-		(fapi_get_u16(skb, u.ma_unitdata_req.peer_index) << 3) | ndev_vif->ifnum << 1;
+		(fapi_get_u16(skb, u.ma_unitdata_req.peer_index) << 4) | ndev_vif->ifnum << 1;
 
+#ifdef CONFIG_SCSC_WIFILOGGER
 	/* Log only the linear skb chunk ... unidata anywya will be truncated to 100.*/
 	SCSC_WLOG_PKTFATE_LOG_TX_DATA_FRAME(fapi_get_u16(skb, u.ma_unitdata_req.host_tag),
 					    skb->data, skb_headlen(skb));
+#endif
 
 	/* ACCESS POINT MODE */
 	if (ndev_vif->vif_type == FAPI_VIFTYPE_AP) {
@@ -307,8 +325,8 @@ int slsi_tx_data(struct slsi_dev *sdev, struct net_device *dev, struct sk_buff *
 							  &ndev_vif->ap.group_data_qs,
 							  slsi_frame_priority_to_ac_queue(skb->priority),
 							  sdev,
-							  (cb->colour & 0x6) >> 1,
-							  (cb->colour & 0xf8) >> 3);
+							  (cb->colour & 0xE) >> 1,
+							  (cb->colour & 0xF0) >> 4);
 			if (ret < 0) {
 				SLSI_NET_WARN(dev, "no fcq for groupcast, drop Tx frame\n");
 				/* Free the local copy here ..if any */
@@ -331,8 +349,8 @@ int slsi_tx_data(struct slsi_dev *sdev, struct net_device *dev, struct sk_buff *
 							   &ndev_vif->ap.group_data_qs,
 							   slsi_frame_priority_to_ac_queue(skb->priority),
 							   sdev,
-							   (cb->colour & 0x6) >> 1,
-							   (cb->colour & 0xf8) >> 3);
+							   (cb->colour & 0xE) >> 1,
+							   (cb->colour & 0xF0) >> 4);
 				if (original_skb)
 					slsi_kfree_skb(skb);
 				return ret;
@@ -362,13 +380,26 @@ int slsi_tx_data(struct slsi_dev *sdev, struct net_device *dev, struct sk_buff *
 	if (peer->qos_enabled)
 		fapi_set_u16(skb, u.ma_unitdata_req.priority, skb->priority);
 
+#ifdef CONFIG_SCSC_WIFI_NAN_ENABLE
+	/* For NAN vif_index is set to ndl_vif */
+	if (ndev_vif->ifnum >= SLSI_NAN_DATA_IFINDEX_START) {
+		if (is_multicast_ether_addr(eth_hdr(skb)->h_dest)) {
+			memcpy(eth_hdr(skb)->h_dest, peer->address, ETH_ALEN);
+			SLSI_NET_DBG1(dev, SLSI_TX, "multicast on NAN interface: changed to peer=%pM\n", eth_hdr(skb)->h_dest);
+		}
+		fapi_set_u16(skb, u.ma_unitdata_req.vif, peer->ndl_vif);
+		cb->colour = (slsi_frame_priority_to_ac_queue(skb->priority) << 8) |
+		(fapi_get_u16(skb, u.ma_unitdata_req.peer_index) << 4) | peer->ndl_vif << 1;
+	}
+#endif
+
 	slsi_debug_frame(sdev, dev, skb, "TX");
 
 	ret = scsc_wifi_fcq_transmit_data(dev, &peer->data_qs,
 					  slsi_frame_priority_to_ac_queue(skb->priority),
 					  sdev,
-					  (cb->colour & 0x6) >> 1,
-					  (cb->colour & 0xf8) >> 3);
+					  (cb->colour & 0xE) >> 1,
+					  (cb->colour & 0xF0) >> 4);
 	if (ret < 0) {
 		SLSI_NET_WARN(dev, "no fcq for %pM, drop Tx frame\n", eth_hdr(skb)->h_dest);
 		slsi_spinlock_unlock(&ndev_vif->peer_lock);
@@ -386,8 +417,8 @@ int slsi_tx_data(struct slsi_dev *sdev, struct net_device *dev, struct sk_buff *
 		/* scsc_wifi_transmit_frame failed, decrement BoT counters */
 		scsc_wifi_fcq_receive_data(dev, &peer->data_qs, slsi_frame_priority_to_ac_queue(skb->priority),
 					   sdev,
-					   (cb->colour & 0x6) >> 1,
-					   (cb->colour & 0xf8) >> 3);
+					   (cb->colour & 0xE) >> 1,
+					   (cb->colour & 0xF0) >> 4);
 
 		if (ret == -ENOSPC) {
 			slsi_spinlock_unlock(&ndev_vif->peer_lock);
@@ -461,8 +492,8 @@ int slsi_tx_data_lower(struct slsi_dev *sdev, struct sk_buff *skb)
 		if (scsc_wifi_fcq_transmit_data(dev, &ndev_vif->ap.group_data_qs,
 						slsi_frame_priority_to_ac_queue(skb->priority),
 						sdev,
-						(cb->colour & 0x6) >> 1,
-						(cb->colour & 0xf8) >> 3) < 0) {
+						(cb->colour & 0xE) >> 1,
+						(cb->colour & 0xF0) >> 4) < 0) {
 			SLSI_NET_DBG3(dev, SLSI_TX, "no fcq for groupcast, dropping TX frame\n");
 			return -EINVAL;
 		}
@@ -481,8 +512,8 @@ int slsi_tx_data_lower(struct slsi_dev *sdev, struct sk_buff *skb)
 		scsc_wifi_fcq_receive_data(dev, &ndev_vif->ap.group_data_qs,
 					   slsi_frame_priority_to_ac_queue(skb->priority),
 					   sdev,
-					   (cb->colour & 0x6) >> 1,
-					   (cb->colour & 0xf8) >> 3);
+					   (cb->colour & 0xE) >> 1,
+					   (cb->colour & 0xF0) >> 4);
 		return ret;
 	}
 
@@ -504,8 +535,8 @@ int slsi_tx_data_lower(struct slsi_dev *sdev, struct sk_buff *skb)
 	if (scsc_wifi_fcq_transmit_data(dev, &peer->data_qs,
 					slsi_frame_priority_to_ac_queue(skb->priority),
 					sdev,
-					(cb->colour & 0x6) >> 1,
-					(cb->colour & 0xf8) >> 3) < 0) {
+					(cb->colour & 0xE) >> 1,
+					(cb->colour & 0xF0) >> 4) < 0) {
 		SLSI_NET_DBG3(dev, SLSI_TX, "no fcq for %02x:%02x:%02x:%02x:%02x:%02x, dropping TX frame\n",
 			      eth_hdr(skb)->h_dest[0], eth_hdr(skb)->h_dest[1], eth_hdr(skb)->h_dest[2], eth_hdr(skb)->h_dest[3], eth_hdr(skb)->h_dest[4], eth_hdr(skb)->h_dest[5]);
 		slsi_spinlock_unlock(&ndev_vif->peer_lock);
@@ -521,8 +552,8 @@ int slsi_tx_data_lower(struct slsi_dev *sdev, struct sk_buff *skb)
 		scsc_wifi_fcq_receive_data(dev, &ndev_vif->ap.group_data_qs,
 					   slsi_frame_priority_to_ac_queue(skb->priority),
 					   sdev,
-					   (cb->colour & 0x6) >> 1,
-					   (cb->colour & 0xf8) >> 3);
+					   (cb->colour & 0xE) >> 1,
+					   (cb->colour & 0xF0) >> 4);
 		if (ret == -ENOSPC)
 			SLSI_NET_DBG1(dev, SLSI_TX,
 				      "TX_LOWER...Queue Full...BUT Dropping packet\n");
@@ -572,9 +603,11 @@ int slsi_tx_control(struct slsi_dev *sdev, struct net_device *dev, struct sk_buf
 	hdr = (struct fapi_signal_header *)skb->data;
 	hdr->fw_reference = 0;
 
+#ifdef CONFIG_SCSC_WIFILOGGER
 	/* Log only the linear skb  chunk */
 	SCSC_WLOG_PKTFATE_LOG_TX_CTRL_FRAME(fapi_get_u16(skb, u.mlme_frame_transmission_ind.host_tag),
 					    skb->data, skb_headlen(skb));
+#endif
 
 	slsi_debug_frame(sdev, dev, skb, "TX");
 	res = scsc_wifi_transmit_frame(&sdev->hip4_inst, true, skb);

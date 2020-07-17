@@ -63,4 +63,10 @@ config CAMERA_MMS_V30S
         depends on VENDER_MCD_V2
         default n
         help
-          This camera is mms_v30s project.          
+          This camera is mms_v30s project.
+config CAMERA_AAS_V51
+        bool "This camera is aas_v51 project"
+        depends on VENDER_MCD_V2
+        default n
+        help
+          This camera is aas_v51 project.

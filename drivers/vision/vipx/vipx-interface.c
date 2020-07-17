@@ -625,11 +625,6 @@ static void __vipx_interface_isr(void *data)
 	vipx_leave();
 }
 
-/* TODO temp code */
-extern void *vertex_interface_data;
-extern irqreturn_t vertex_interface_isr0(int irq, void *data);
-extern irqreturn_t vertex_interface_isr1(int irq, void *data);
-
 static irqreturn_t vipx_interface_isr0(int irq, void *data)
 {
 	struct vipx_interface *itf;
@@ -645,10 +640,7 @@ static irqreturn_t vipx_interface_isr0(int irq, void *data)
 		val &= ~(0x1);
 		sys->ctrl_ops->clear_irq(sys, IRQ_FROM_DEVICE, val);
 
-		if (test_bit(VIPX_ITF_STATE_OPEN, &itf->state))
-			__vipx_interface_isr(data);
-		else
-			vertex_interface_isr0(irq, vertex_interface_data);
+		__vipx_interface_isr(data);
 	}
 
 	vipx_leave();
@@ -670,10 +662,7 @@ static irqreturn_t vipx_interface_isr1(int irq, void *data)
 		val &= ~(0x1 << 0x1);
 		sys->ctrl_ops->clear_irq(sys, IRQ_FROM_DEVICE, val);
 
-		if (test_bit(VIPX_ITF_STATE_OPEN, &itf->state))
-			__vipx_interface_isr(data);
-		else
-			vertex_interface_isr1(irq, vertex_interface_data);
+		__vipx_interface_isr(data);
 	}
 
 	vipx_leave();

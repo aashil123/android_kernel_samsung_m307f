@@ -23,7 +23,9 @@
 #include "dev.h"
 #include "hip4_sampler.h"
 
+#ifdef CONFIG_ANDROID
 #include "scsc_wifilogger_rings.h"
+#endif
 
 #include "debug.h"
 
@@ -888,9 +890,18 @@ static int hip4_q_add_signal(struct slsi_hip4 *hip, enum hip4_hip_q_conf conf, s
 	return 0;
 }
 
+#if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
+static void hip4_watchdog(struct timer_list *t)
+#else
 static void hip4_watchdog(unsigned long data)
+#endif
 {
+#if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
+        struct hip4_priv        *priv = from_timer(priv, t, watchdog);
+        struct slsi_hip4        *hip = priv->hip;
+#else
 	struct slsi_hip4        *hip = (struct slsi_hip4 *)data;
+#endif
 	struct slsi_dev         *sdev = container_of(hip, struct slsi_dev, hip4_inst);
 	struct scsc_service     *service;
 	ktime_t                 intr_ov;
@@ -981,7 +992,8 @@ static void hip4_watchdog(unsigned long data)
 
 #ifdef CONFIG_SCSC_WLAN_RX_NAPI
 	if (conf_hip4_ver == 4) {
-		for (u8 i = 0; i < MIF_HIP_CFG_Q_NUM; i++) {
+		u8 i;
+		for (i = 0; i < MIF_HIP_CFG_Q_NUM; i++) {
 			if (hip->hip_priv->intr_tohost_mul[i] == MIF_NO_IRQ)
 				continue;
 			if (scsc_service_mifintrbit_bit_mask_status_get(service) & (1 << hip->hip_priv->intr_tohost_mul[i])) {
@@ -1075,15 +1087,15 @@ static void hip4_wq_fb(struct work_struct *data)
 		/* colour is defined as: */
 		/* u16 register bits:
 		 * 0      - do not use
-		 * [2:1]  - vif
-		 * [7:3]  - peer_index
+		 * [3:1]  - vif
+		 * [7:4]  - peer_index
 		 * [10:8] - ac queue
 		 */
 		colour = ((m->clas & 0xc0) << 2) | (m->pid & 0xfe);
 		/* Account ONLY for data RFB */
 		if ((m->pid & 0x1) == MBULK_POOL_ID_DATA) {
 #ifdef CONFIG_SCSC_WLAN_HIP4_PROFILING
-			SCSC_HIP4_SAMPLER_VIF_PEER(hip->hip_priv->minor, 0, (colour & 0x6) >> 1, (colour & 0xf8) >> 3);
+			SCSC_HIP4_SAMPLER_VIF_PEER(hip->hip_priv->minor, 0, (colour & 0xE) >> 1, (colour & 0xF0) >> 4);
 			/* to profile round-trip */
 			{
 				u16 host_tag;
@@ -1153,6 +1165,7 @@ static void hip4_irq_handler_fb(int irq, void *data)
 		schedule_work(&hip->hip_priv->intr_wq_fb);
 	else
 		queue_work(hip->hip_priv->hip4_workq, &hip->hip_priv->intr_wq_fb);
+
 	/* Clear interrupt */
 	scsc_service_mifintrbit_bit_clear(sdev->service, irq);
 	SCSC_HIP4_SAMPLER_INT_OUT(hip->hip_priv->minor, 2);
@@ -1330,6 +1343,7 @@ static void hip4_irq_handler_ctrl(int irq, void *data)
 		schedule_work(&hip->hip_priv->intr_wq_ctrl);
 	else
 		queue_work(hip->hip_priv->hip4_workq, &hip->hip_priv->intr_wq_ctrl);
+
 	/* Clear interrupt */
 	scsc_service_mifintrbit_bit_clear(sdev->service, irq);
 	SCSC_HIP4_SAMPLER_INT_OUT(hip->hip_priv->minor, 1);
@@ -1557,6 +1571,7 @@ static void hip4_irq_handler_dat(int irq, void *data)
 
 	/* Mask interrupt to avoid interrupt storm and let BH run */
 	scsc_service_mifintrbit_bit_mask(sdev->service, hip->hip_priv->intr_tohost_mul[HIP4_MIF_Q_TH_DAT]);
+
 	/* Clear interrupt */
 	scsc_service_mifintrbit_bit_clear(sdev->service, hip->hip_priv->intr_tohost_mul[HIP4_MIF_Q_TH_DAT]);
 	SCSC_HIP4_SAMPLER_INT_OUT(hip->hip_priv->minor, 0);
@@ -1694,15 +1709,15 @@ static void hip4_wq(struct work_struct *data)
 		/* colour is defined as: */
 		/* u16 register bits:
 		 * 0      - do not use
-		 * [2:1]  - vif
-		 * [7:3]  - peer_index
+		 * [3:1]  - vif
+		 * [7:4]  - peer_index
 		 * [10:8] - ac queue
 		 */
 		colour = ((m->clas & 0xc0) << 2) | (m->pid & 0xfe);
 		/* Account ONLY for data RFB */
 		if ((m->pid & 0x1) == MBULK_POOL_ID_DATA) {
 #ifdef CONFIG_SCSC_WLAN_HIP4_PROFILING
-			SCSC_HIP4_SAMPLER_VIF_PEER(hip->hip_priv->minor, 0, (colour & 0x6) >> 1, (colour & 0xf8) >> 3);
+			SCSC_HIP4_SAMPLER_VIF_PEER(hip->hip_priv->minor, 0, (colour & 0xE) >> 1, (colour & 0xF0) >> 4);
 			/* to profile round-trip */
 			{
 				u16 host_tag;
@@ -1896,7 +1911,7 @@ consume_ctl_mbulk:
 #else
 		if (m->flag & MBULK_F_WAKEUP) {
 			SLSI_INFO(sdev, "WIFI wakeup by DATA frame:\n");
-			SCSC_BIN_TAG_INFO(BINARY, skb->data, fapi_get_siglen(skb) + ETH_HLEN);
+			SCSC_BIN_TAG_INFO(BINARY, fapi_get_data(skb), fapi_get_datalen(skb) > 54 ? 54 : fapi_get_datalen(skb));
 		}
 #endif
 #ifdef CONFIG_SCSC_WLAN_DEBUG
@@ -1954,6 +1969,7 @@ skip_data_q:
 		atomic_set(&hip->hip_priv->watchdog_timer_active, 0);
 		scsc_service_mifintrbit_bit_unmask(service, hip->hip_priv->intr_tohost);
 	}
+
 #ifdef CONFIG_ANDROID
 	if (wake_lock_active(&hip->hip_priv->hip4_wake_lock)) {
 		wake_unlock(&hip->hip_priv->hip4_wake_lock);
@@ -1981,10 +1997,8 @@ static void hip4_irq_handler(int irq, void *data)
 	SCSC_HIP4_SAMPLER_INT(hip->hip_priv->minor, 0);
 	SCSC_HIP4_SAMPLER_INT(hip->hip_priv->minor, 1);
 	SCSC_HIP4_SAMPLER_INT(hip->hip_priv->minor, 2);
-	if (!atomic_read(&hip->hip_priv->rx_ready))
-		goto end;
-
 	intr_received = ktime_get();
+
 #ifdef CONFIG_ANDROID
 	if (!wake_lock_active(&hip->hip_priv->hip4_wake_lock)) {
 		wake_lock_timeout(&hip->hip_priv->hip4_wake_lock, msecs_to_jiffies(SLSI_HIP_WAKELOCK_TIME_OUT_IN_MS));
@@ -2024,7 +2038,7 @@ static void hip4_irq_handler(int irq, void *data)
 		schedule_work(&hip->hip_priv->intr_wq);
 	else
 		queue_work(hip->hip_priv->hip4_workq, &hip->hip_priv->intr_wq);
-end:
+
 	/* Clear interrupt */
 	scsc_service_mifintrbit_bit_clear(sdev->service, hip->hip_priv->intr_tohost);
 	SCSC_HIP4_SAMPLER_INT_OUT(hip->hip_priv->minor, 0);
@@ -2106,6 +2120,9 @@ int hip4_init(struct slsi_hip4 *hip)
 	int                     ret;
 	u32                     total_mib_len;
 	u32                     mib_file_offset;
+#ifdef CONFIG_SCSC_WLAN_RX_NAPI
+	struct net_device 	*dev;
+#endif
 
 	if (!sdev || !sdev->service)
 		return -EINVAL;
@@ -2194,9 +2211,6 @@ int hip4_init(struct slsi_hip4 *hip)
 	/* Reset Sample q values sending 0xff */
 	SCSC_HIP4_SAMPLER_RESET(hip->hip_priv->minor);
 
-	/* Set driver is not ready to receive interrupts */
-	atomic_set(&hip->hip_priv->rx_ready, 0);
-
 	/***** VERSION 4 *******/
 	/* TOHOST Handler allocator */
 #ifdef CONFIG_SCSC_WLAN_RX_NAPI
@@ -2218,6 +2232,17 @@ int hip4_init(struct slsi_hip4 *hip)
 	hip->hip_priv->intr_tohost_mul[HIP4_MIF_Q_TH_DAT] =
 		scsc_service_mifintrbit_register_tohost(service, hip4_irq_handler_dat, hip);
 	scsc_service_mifintrbit_bit_mask(service, hip->hip_priv->intr_tohost_mul[HIP4_MIF_Q_TH_DAT]);
+
+	rcu_read_lock();
+	/* one NAPI instance is ok for multiple netdev devices */
+	dev = slsi_get_netdev_rcu(sdev, SLSI_NET_INDEX_WLAN);
+	if (!dev) {
+		SLSI_ERR(sdev, "netdev No longer exists\n");
+		rcu_read_unlock();
+		return -EINVAL;
+	}
+	netif_napi_add(dev, &hip->hip_priv->napi, hip4_napi_poll, NAPI_POLL_WEIGHT);
+	rcu_read_unlock();
 #endif
 	/* TOHOST Handler allocator */
 	hip->hip_priv->intr_tohost =
@@ -2380,7 +2405,11 @@ int hip4_init(struct slsi_hip4 *hip)
 	/* Setup watchdog timer */
 	atomic_set(&hip->hip_priv->watchdog_timer_active, 0);
 	spin_lock_init(&hip->hip_priv->watchdog_lock);
+#if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
+	timer_setup(&hip->hip_priv->watchdog, hip4_watchdog, 0);
+#else
 	setup_timer(&hip->hip_priv->watchdog, hip4_watchdog, (unsigned long)hip);
+#endif
 
 	atomic_set(&hip->hip_priv->gmod, HIP4_DAT_SLOTS);
 	atomic_set(&hip->hip_priv->gactive, 1);
@@ -2481,7 +2510,6 @@ int scsc_wifi_transmit_frame(struct slsi_hip4 *hip, bool ctrl_packet, struct sk_
 	}
 #endif
 #endif
-
 	service = sdev->service;
 
 	fapi_header = (struct fapi_signal_header *)skb->data;
@@ -2580,9 +2608,6 @@ int hip4_setup(struct slsi_hip4 *hip)
 	struct slsi_dev     *sdev = container_of(hip, struct slsi_dev, hip4_inst);
 	struct scsc_service *service;
 	u32 conf_hip4_ver = 0;
-#ifdef CONFIG_SCSC_WLAN_RX_NAPI
-	struct net_device *dev;
-#endif
 
 	if (!sdev || !sdev->service)
 		return -EIO;
@@ -2609,17 +2634,7 @@ int hip4_setup(struct slsi_hip4 *hip)
 		hip->hip_priv->version = 4;
 
 #ifdef CONFIG_SCSC_WLAN_RX_NAPI
-		rcu_read_lock();
-		/* one NAPI instance is ok for multiple netdev devices */
-		dev = slsi_get_netdev_rcu(sdev, SLSI_NET_INDEX_WLAN);
-		if (!dev) {
-			SLSI_ERR(sdev, "netdev No longer exists\n");
-			rcu_read_unlock();
-			return -EINVAL;
-		}
-		netif_napi_add(dev, &hip->hip_priv->napi, hip4_napi_poll, NAPI_POLL_WEIGHT);
 		napi_enable(&hip->hip_priv->napi);
-		rcu_read_unlock();
 #endif
 	} else {
 		/* version 5 */
@@ -2635,9 +2650,6 @@ int hip4_setup(struct slsi_hip4 *hip)
 	atomic_set(&sdev->debug_inds, 0);
 
 	atomic_set(&hip->hip_priv->closing, 0);
-
-	/* Driver is ready to process IRQ */
-	atomic_set(&hip->hip_priv->rx_ready, 1);
 
 #ifdef CONFIG_SCSC_WLAN_RX_NAPI
 	if (conf_hip4_ver == 4) {
@@ -2683,7 +2695,8 @@ void hip4_suspend(struct slsi_hip4 *hip)
 	conf_hip4_ver = scsc_wifi_get_hip_config_version(&hip->hip_control->init);
 
 	if (conf_hip4_ver == 4) {
-		for (u8 i = 0; i < MIF_HIP_CFG_Q_NUM; i++)
+		u8 i;
+		for (i = 0; i < MIF_HIP_CFG_Q_NUM; i++)
 			if (hip->hip_priv->intr_tohost_mul[i] != MIF_NO_IRQ)
 				scsc_service_mifintrbit_bit_unmask(service, hip->hip_priv->intr_tohost_mul[i]);
 	} else {
@@ -2718,7 +2731,8 @@ void hip4_resume(struct slsi_hip4 *hip)
 	conf_hip4_ver = scsc_wifi_get_hip_config_version(&hip->hip_control->init);
 
 	if (conf_hip4_ver == 4) {
-		for (u8 i = 0; i < MIF_HIP_CFG_Q_NUM; i++)
+		u8 i;
+		for (i = 0; i < MIF_HIP_CFG_Q_NUM; i++)
 			if (hip->hip_priv->intr_tohost_mul[i] != MIF_NO_IRQ)
 				scsc_service_mifintrbit_bit_unmask(service, hip->hip_priv->intr_tohost_mul[i]);
 	} else {
@@ -2761,7 +2775,8 @@ void hip4_freeze(struct slsi_hip4 *hip)
 	conf_hip4_ver = scsc_wifi_get_hip_config_version(&hip->hip_control->init);
 
 	if (conf_hip4_ver == 4) {
-		for (u8 i = 0; i < MIF_HIP_CFG_Q_NUM; i++)
+		u8 i;
+		for (i = 0; i < MIF_HIP_CFG_Q_NUM; i++)
 			if (hip->hip_priv->intr_tohost_mul[i] != MIF_NO_IRQ)
 				scsc_service_mifintrbit_bit_mask(service, hip->hip_priv->intr_tohost_mul[i]);
 
@@ -2778,7 +2793,6 @@ void hip4_freeze(struct slsi_hip4 *hip)
 #endif
 	flush_workqueue(hip->hip_priv->hip4_workq);
 	destroy_workqueue(hip->hip_priv->hip4_workq);
-	atomic_set(&hip->hip_priv->rx_ready, 0);
 	atomic_set(&hip->hip_priv->watchdog_timer_active, 0);
 
 	/* Deactive the wd timer prior its expiration */
@@ -2790,8 +2804,9 @@ void hip4_deinit(struct slsi_hip4 *hip)
 	struct slsi_dev     *sdev = container_of(hip, struct slsi_dev, hip4_inst);
 	struct scsc_service *service;
 #ifdef CONFIG_SCSC_WLAN_RX_NAPI
-	u32 conf_hip4_ver = 0;
+	u8 i;
 #endif
+
 	if (!sdev || !sdev->service)
 		return;
 
@@ -2815,19 +2830,12 @@ void hip4_deinit(struct slsi_hip4 *hip)
 		hip4_smapper_deinit(sdev, hip);
 	}
 #endif
-#ifdef CONFIG_ANDROID
-#ifdef CONFIG_SCSC_WLAN_RX_NAPI
-	wake_lock_destroy(&hip->hip_priv->hip4_wake_lock_tx);
-	wake_lock_destroy(&hip->hip_priv->hip4_wake_lock_ctrl);
-	wake_lock_destroy(&hip->hip_priv->hip4_wake_lock_data);
-#endif
-	wake_lock_destroy(&hip->hip_priv->hip4_wake_lock);
-#endif
+
 	closing = ktime_get();
 	atomic_set(&hip->hip_priv->closing, 1);
 
 #ifdef CONFIG_SCSC_WLAN_RX_NAPI
-	for (u8 i = 0; i < MIF_HIP_CFG_Q_NUM; i++)
+	for (i = 0; i < MIF_HIP_CFG_Q_NUM; i++)
 		if (hip->hip_priv->intr_tohost_mul[i] != MIF_NO_IRQ)
 			scsc_service_mifintrbit_bit_mask(service, hip->hip_priv->intr_tohost_mul[i]);
 
@@ -2839,12 +2847,7 @@ void hip4_deinit(struct slsi_hip4 *hip)
 		if (hip->hip_priv->intr_tohost_mul[i] != MIF_NO_IRQ)
 			scsc_service_mifintrbit_unregister_tohost(service, hip->hip_priv->intr_tohost_mul[i]);
 
-	/* Get the Version reported by the FW */
-	conf_hip4_ver = scsc_wifi_get_hip_config_version(&hip->hip_control->init);
-
-	if (conf_hip4_ver == 4) {
-		netif_napi_del(&hip->hip_priv->napi);
-	}
+	netif_napi_del(&hip->hip_priv->napi);
 #endif
 	scsc_service_mifintrbit_bit_mask(service, hip->hip_priv->intr_tohost);
 	cancel_work_sync(&hip->hip_priv->intr_wq);
@@ -2855,11 +2858,19 @@ void hip4_deinit(struct slsi_hip4 *hip)
 
 	scsc_service_mifintrbit_free_fromhost(service, hip->hip_priv->intr_fromhost, SCSC_MIFINTR_TARGET_R4);
 
+#ifdef CONFIG_ANDROID
+#ifdef CONFIG_SCSC_WLAN_RX_NAPI
+	wake_lock_destroy(&hip->hip_priv->hip4_wake_lock_tx);
+	wake_lock_destroy(&hip->hip_priv->hip4_wake_lock_ctrl);
+	wake_lock_destroy(&hip->hip_priv->hip4_wake_lock_data);
+#endif
+	wake_lock_destroy(&hip->hip_priv->hip4_wake_lock);
+#endif
+
 	/* If we get to that point with rx_lock/tx_lock claimed, trigger BUG() */
 	WARN_ON(atomic_read(&hip->hip_priv->in_tx));
 	WARN_ON(atomic_read(&hip->hip_priv->in_rx));
 
-	atomic_set(&hip->hip_priv->rx_ready, 0);
 	atomic_set(&hip->hip_priv->watchdog_timer_active, 0);
 	/* Deactive the wd timer prior its expiration */
 	del_timer_sync(&hip->hip_priv->watchdog);

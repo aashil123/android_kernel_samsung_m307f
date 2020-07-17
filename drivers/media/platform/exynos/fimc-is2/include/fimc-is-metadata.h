@@ -1979,6 +1979,12 @@ enum camera_client_index {
 	CAMERA_APP_CATEGORY_MAX
 };
 
+enum remosaic_oper_mode {
+	REMOSAIC_OPER_MODE_NONE = 0,
+	REMOSAIC_OPER_MODE_SINGLE = 1,
+	REMOSAIC_OPER_MODE_MFHDR = 2,
+};
+
 /** \brief
   User-defined control area.
   \remarks

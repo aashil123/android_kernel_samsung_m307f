@@ -28,6 +28,16 @@
 #define TE_PROTECT_ON_TIME		158 /* 15.8ms*/
 #define TE_TIMEOUT_TIME			180 /* 18ms */
 
+/* CHIP_ID & HACT_PERIOD registers are defined here
+ * only in order to check sub revision
+ * and then set Hactive period
+ * for evt 0.3 which is revised relating to wclk margin removal
+ */
+#define CHIP_ID_REVISION_ADDR		0x10000010	/* [23:20] : main, [19:16] : sub */
+#define CHIP_ID_SUB_REVISION_GET(x)	((x >> 16) & 0xf)
+
+#define DSIM_HACT_PERIOD_ADDR		0x14810004	/* located at SYSREG_DISPAUD */
+
 const u32 DSIM_PHY_CHARIC_VAL[][9] = {
 	/* MPLL_CTRL1, MPLL_CTRL2, B_DPHY_CTRL2, B_DPHY_CTRL3, B_DPHY_CTRL_4,
 	   M_DPHY_CTRL1, M_DPHY_CTRL2, M_DPHY_CTRL3, M_DPHY_CTRL4*/
@@ -294,6 +304,27 @@ const u32 b_dphyctl[14] = {
 };
 
 /***************************** DPHY CAL functions *******************************/
+static u32 dsim_get_chip_sub_revision(void)
+{
+	void __iomem *revision_addr = ioremap(CHIP_ID_REVISION_ADDR, 0x4);
+	u32 val = readl(revision_addr);
+
+	iounmap(revision_addr);
+
+	dsim_info("%s : CHIP_ID_SUB_REVISION = %d\n", __func__, CHIP_ID_SUB_REVISION_GET(val));
+
+	return CHIP_ID_SUB_REVISION_GET(val);
+}
+
+static void dsim_set_hactive_period(u32 hact_period)
+{
+	void __iomem *sysreg_hact_addr = ioremap(DSIM_HACT_PERIOD_ADDR, 0x4);
+
+	writel(hact_period, sysreg_hact_addr);
+
+	iounmap(sysreg_hact_addr);
+}
+
 void dsim_reg_set_m_pll_ctrl1(u32 id, u32 m_pll_ctrl1)
 {
 	dsim_write(id, DSIM_PLL_CTRL1, m_pll_ctrl1);
@@ -766,15 +797,53 @@ static void dsim_reg_set_hresol(u32 id, u32 hresol, struct decon_lcd *lcd)
 
 static void dsim_reg_set_porch(u32 id, struct decon_lcd *lcd)
 {
+	u32 hblank, vblank;
+	u64 vclk, vclk_div2, wclk;	/* unit : hz */
+	u64 hact_period, hbp_period, hfp_period, hsa_period;
+
 	if (lcd->mode == DECON_VIDEO_MODE) {
 		dsim_reg_set_vbp(id, lcd->vbp);
 		dsim_reg_set_vfp(id, lcd->vfp);
 		dsim_reg_set_stable_vfp(id, DSIM_STABLE_VFP_VALUE);
 		dsim_reg_set_cmdallow(id, lcd->vfp - DSIM_STABLE_VFP_VALUE - 3);
-		dsim_reg_set_hbp(id, lcd->hbp);
-		dsim_reg_set_hfp(id, lcd->hfp);
 		dsim_reg_set_vsa(id, lcd->vsa);
-		dsim_reg_set_hsa(id, lcd->hsa);
+
+		if (dsim_get_chip_sub_revision() >= 3) {
+			hblank = lcd->hsa + lcd->hbp + lcd->hfp;
+			vblank = lcd->vsa + lcd->vbp + lcd->vfp;
+			vclk = (lcd->xres + hblank) * (lcd->yres + vblank) * lcd->fps;
+			vclk_div2 = vclk / 2;
+			wclk = lcd->hs_clk * 1000000 / 16;
+
+			hbp_period = lcd->hbp * wclk / vclk_div2;
+			hbp_period = (hbp_period + 1) / 2 * 2;	/* should be even */
+			dsim_reg_set_hbp(id, (u32)hbp_period);
+
+			hfp_period = lcd->hfp * wclk / vclk_div2;
+			hfp_period = (hfp_period + 1) / 2 * 2;	/* should be even */
+			dsim_reg_set_hfp(id, (u32)hfp_period);
+
+			hsa_period = lcd->hsa * wclk / vclk_div2;
+			hsa_period = (hsa_period + 1) / 2 * 2;	/* should be even */
+			dsim_reg_set_hsa(id, (u32)hsa_period);
+
+			hact_period = lcd->xres * wclk / vclk_div2;
+			hact_period = (hact_period + 1) / 2 * 2;	/* should be even */
+			dsim_set_hactive_period((u32)hact_period);
+
+			dsim_info("vclk = %llukHz, vclk_div2 = %llukHz\n",
+				vclk / 1000, vclk_div2 / 1000);
+			dsim_info("hsclk = %ukHz, wclk = %llukHz\n",
+				lcd->hs_clk * 1000, wclk / 1000);
+			dsim_info("hsa_period = %llu, hbp_period = %llu, hfp_period = %llu\n",
+				hsa_period, hbp_period, hfp_period);
+			dsim_info("hact_period = %llu\n", hact_period);
+		} else {
+			dsim_reg_set_hbp(id, lcd->hbp);
+			dsim_reg_set_hfp(id, lcd->hfp);
+			dsim_reg_set_hsa(id, lcd->hsa);
+		}
+
 	}
 }
 
@@ -1422,7 +1491,10 @@ static void dsim_reg_set_config(u32 id, struct decon_lcd *lcd_info,
 	if (lcd_info->mode == DECON_MIPI_COMMAND_MODE) {
 		dsim_reg_set_cmd_ctrl(id, lcd_info, clks);
 	} else if (lcd_info->mode == DECON_VIDEO_MODE) {
-		dsim_reg_set_vt_compensate(id, lcd_info->vt_compensation);
+		if (dsim_get_chip_sub_revision() >= 3)
+			dsim_reg_set_vt_compensate(id, 0);
+		else
+			dsim_reg_set_vt_compensate(id, lcd_info->vt_compensation);
 		dsim_reg_set_vstatus_int(id, DSIM_VSYNC);
 	}
 
@@ -1755,12 +1827,24 @@ void dsim_reg_init(u32 id, struct decon_lcd *lcd_info, struct dsim_clks *clks,
 		bool panel_ctrl)
 {
 	struct dsim_device *dsim = get_dsim_drvdata(id);
-
+#if 1
 	if (dsim->state == DSIM_STATE_INIT) {
 		if (dsim_reg_is_pll_stable(dsim->id)) {
 			dsim_info("dsim%d PLL is stabled in bootloader, so skip DSIM link/DPHY init.\n", dsim->id);
 			return;
 		}
+	}
+#endif
+
+	/* Panel power on */
+	if (panel_ctrl) {
+
+		dsim_set_panel_power_early(dsim);
+
+		if (dsim->state != DSIM_STATE_INIT)
+			call_panel_ops(dsim, resume_early, dsim);
+
+		dsim_set_panel_power(dsim, 1);
 	}
 
 	/* choose OSC_CLK */
@@ -1779,10 +1863,6 @@ void dsim_reg_init(u32 id, struct decon_lcd *lcd_info, struct dsim_clks *clks,
 	dsim_reg_set_link_clock(id, 1);	/* Selection to word clock */
 	dsim_reg_set_esc_clk_on_lane(id, 1, dsim->data_lane);
 	dsim_reg_enable_word_clock(id, 1);
-
-	/* Panel power on */
-	if (panel_ctrl)
-		dsim_set_panel_power(dsim, 1);
 
 	dsim_reg_set_config(id, lcd_info, clks);
 
@@ -1814,7 +1894,7 @@ int dsim_reg_stop(u32 id, u32 lanes)
 	dsim_reg_set_link_clock(id, 0);
 	dsim_reg_set_lanes(id, lanes, 0);
 	dsim_reg_set_esc_clk_on_lane(id, 0, lanes);
-//	dsim_reg_enable_word_clock(id, 0);
+/*	dsim_reg_enable_word_clock(id, 0); */
 	dsim_reg_set_clocks(id, NULL, NULL, 0);
 	dsim_reg_sw_reset(id);
 

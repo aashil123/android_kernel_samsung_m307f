@@ -88,8 +88,8 @@
 #define SENSOR_INFO_SCONTEXT                                    {"scontext_iio", true, REPORT_MODE_CONTINUOUS, 0, 64}
 #define SENSOR_INFO_CALL_GESTURE                                {"call_gesture", CALL_GESTURE_ENABLED, REPORT_MODE_ON_CHANGE, 1, 1}
 #define SENSOR_INFO_WAKE_UP_MOTION                              {"wake_up_motion", WAKE_UP_MOTION_ENABLED, REPORT_MODE_ON_CHANGE, 1, 1}
-#define SENSOR_INFO_LIGHT                                       {"light_sensor", LIGHT_ENABLED, REPORT_MODE_ON_CHANGE, 24, 4}
-#define SENSOR_INFO_LIGHT_CCT                                   {"light_cct_sensor", LIGHT_ENABLED, REPORT_MODE_ON_CHANGE, 24, 8}
+#define SENSOR_INFO_LIGHT                                       {"light_sensor", LIGHT_ENABLED, REPORT_MODE_ON_CHANGE, 28, 4}
+#define SENSOR_INFO_LIGHT_CCT                                   {"light_cct_sensor", LIGHT_ENABLED, REPORT_MODE_ON_CHANGE, 24, 12}
 #define SENSOR_INFO_AUTO_BIRGHTNESS                             {"auto_brightness", AUTO_BRIGHTNESS_ENABLED, REPORT_MODE_ON_CHANGE, 8, 4}
 #define SENSOR_INFO_VDIS_GYRO                                   {"vdis_gyro_sensor", VDIS_GYROSCOPE_ENABLED, REPORT_MODE_CONTINUOUS, 6, 6}
 #define SENSOR_INFO_POCKET_MODE                                 {"pocket_mode_sensor", POCKET_MODE_ENABLED, REPORT_MODE_ON_CHANGE, 5, 5}

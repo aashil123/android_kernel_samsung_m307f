@@ -1820,7 +1820,7 @@
 			compatible = "samsung,abox-rdma";
 			reg = <0x0 0x14A51600 0x100>;
 			id = <6>;
-			type = "realtime";
+			type = "normal";
 			scsc_bt;
 			buffer_type = "dma";
 		};

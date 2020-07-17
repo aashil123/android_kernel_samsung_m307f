@@ -37,7 +37,11 @@
 #endif
 
 extern int ignore_fs_panic;
+extern int hard_reset_key_pressed;
 extern void (*ufs_debug_func)(void *);
+
+extern struct super_block *keypress_callback_sb;
+extern int (*keypress_callback_fn)(struct super_block *sb);
 
 #define f2fs_bug_on(sbi, condition)						\
 	do {									\
@@ -140,6 +144,7 @@ struct f2fs_mount_info {
 	block_t core_reserved_blocks;	/* core reserved blocks */
 	kuid_t s_resuid;		/* reserved blocks for uid */
 	kgid_t s_resgid;		/* reserved blocks for gid */
+	kgid_t flush_group;		/* should issue flush for gid */
 	int active_logs;		/* # of active logs */
 	int inline_xattr_size;		/* inline xattr size */
 #ifdef CONFIG_F2FS_FAULT_INJECTION
@@ -182,6 +187,7 @@ struct f2fs_mount_info {
  */
 #define	F2FS_DEF_RESUID		0
 #define	F2FS_DEF_RESGID		0
+#define	F2FS_DEF_FLUSHGROUP	5666
 
 /*
  * For checkpoint manager
@@ -2462,11 +2468,12 @@ static inline void f2fs_change_bit(unsigned int nr, char *addr)
 #define F2FS_EXTENTS_FL			0x00080000 /* Inode uses extents */
 #define F2FS_EA_INODE_FL	        0x00200000 /* Inode used for large EA */
 #define F2FS_EOFBLOCKS_FL		0x00400000 /* Blocks allocated beyond EOF */
+#define F2FS_NOCOW_FL			0x00800000 /* Do not cow file */
 #define F2FS_INLINE_DATA_FL		0x10000000 /* Inode has inline data. */
 #define F2FS_PROJINHERIT_FL		0x20000000 /* Create with parents projid */
 #define F2FS_RESERVED_FL		0x80000000 /* reserved for ext4 lib */
 
-#define F2FS_FL_USER_VISIBLE		0x304BDFFF /* User visible flags */
+#define F2FS_FL_USER_VISIBLE		0x30CBDFFF /* User visible flags */
 #define F2FS_FL_USER_MODIFIABLE		0x204BC0FF /* User modifiable flags */
 
 /* Flags we can manipulate with through F2FS_IOC_FSSETXATTR */

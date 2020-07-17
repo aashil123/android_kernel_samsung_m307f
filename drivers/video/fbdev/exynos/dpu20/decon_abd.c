@@ -18,6 +18,9 @@
 #include <linux/reboot.h>
 #include <linux/debugfs.h>
 #include <linux/list.h>
+#if defined(CONFIG_SEC_DEBUG)
+#include <linux/sec_debug.h>
+#endif
 
 #include "../../../../../kernel/irq/internals.h"
 #include "decon.h"
@@ -28,6 +31,62 @@
 
 #define abd_printf(m, ...)	\
 {	if (m) seq_printf(m, __VA_ARGS__); else decon_info(__VA_ARGS__);	}	\
+
+#if defined(CONFIG_LOGGING_BIGDATA_BUG)
+/* Gen Big Data Error for Decon's Bug
+ *
+ * return value
+ * 1. 31 ~ 28 : decon_id
+ * 2. 27 ~ 24 : decon eing pend register
+ * 3. 23 ~ 16 : dsim underrun count
+ * 4. 15 ~  8 : 0x0e panel register
+ * 5.  7 ~  0 : 0x0a panel register
+ * */
+
+static unsigned int gen_decon_bug_bigdata(struct decon_device *decon)
+{
+	struct dsim_device *dsim;
+	unsigned int value, panel_value;
+	unsigned int underrun_cnt = 0;
+
+	/* for decon id */
+	value = decon->id << 28;
+
+	if (decon->id == 0) {
+		/* for eint pend value */
+		value |= (decon->eint_pend & 0x0f) << 24;
+
+		/* for underrun count */
+		dsim = container_of(decon->out_sd[0], struct dsim_device, sd);
+		if (dsim != NULL) {
+			underrun_cnt = dsim->total_underrun_cnt;
+			if (underrun_cnt > 0xff) {
+				decon_info("%s:dsim underrun exceed 1byte : %d\n",
+						__func__, underrun_cnt);
+				underrun_cnt = 0xff;
+			}
+		}
+		value |= underrun_cnt << 16;
+
+		/* for panel dump */
+		panel_value = call_panel_ops(dsim, get_buginfo, dsim);
+		value |= panel_value & 0xffff;
+	}
+
+	decon_info("%s:big data : %x\n", __func__, value);
+	return value;
+}
+
+void log_decon_bigdata(struct decon_device *decon)
+{
+	unsigned int bug_err_num;
+
+	bug_err_num = gen_decon_bug_bigdata(decon);
+#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
+	sec_debug_set_extra_info_decon(bug_err_num);
+#endif
+}
+#endif
 
 void decon_abd_save_str(struct abd_protect *abd, const char *print)
 {
@@ -129,22 +188,29 @@ void decon_abd_save_udr(struct abd_protect *abd, unsigned long mif, unsigned lon
 	struct abd_log *lcdon_log = &lcdon->log[(lcdon->count) % ABD_LOG_MAX];
 	struct abd_log *event_log = &event->log[(event->count) % ABD_LOG_MAX];
 
-	memset(event_log, 0, sizeof(struct abd_log));
 	event_log->stamp = local_clock();
 	event_log->mif = mif;
 	event_log->iint = iint;
 	event_log->disp = disp;
-	memcpy(&event_log->bts, &decon->bts, sizeof(struct decon_bts));
+	memcpy(event_log->bts, &decon->bts, sizeof(struct decon_bts));
 
 	if (!first->count) {
-		memset(first_log, 0, sizeof(struct abd_log));
-		memcpy(first_log, event_log, sizeof(struct abd_log));
+		first_log->stamp = event_log->stamp;
+		first_log->mif = event_log->mif;
+		first_log->iint = event_log->iint;
+		first_log->disp = event_log->disp;
+
+		memcpy(first_log->bts, event_log->bts, sizeof(struct decon_bts));
 		first->count++;
 	}
 
 	if (!lcdon->lcdon_flag) {
-		memset(lcdon_log, 0, sizeof(struct abd_log));
-		memcpy(lcdon_log, event_log, sizeof(struct abd_log));
+		lcdon_log->stamp = event_log->stamp;
+		lcdon_log->mif = event_log->mif;
+		lcdon_log->iint = event_log->iint;
+		lcdon_log->disp = event_log->disp;
+
+		memcpy(lcdon_log->bts, event_log->bts, sizeof(struct decon_bts));
 		lcdon->count++;
 		lcdon->lcdon_flag++;
 	}
@@ -193,16 +259,16 @@ static void decon_abd_pin_enable_interrupt(struct decon_device *decon, struct ab
 
 	pin->level = gpio_get_value(pin->gpio);
 
-	if (pin->level == pin->active_level) {
+	if (pin->level == pin->active_level)
 		decon_abd_save_pin(decon, pin, trace, on);
-		if (pin->name && !strcmp(pin->name, "pcd")) {
-			decon->ignore_vsync = 1;
-			decon_info("%s: ignore_vsync: %d\n", __func__, decon->ignore_vsync);
-		}
-	}
 
 	decon_info("%s: on: %d, %s(%d,%d) level: %d, count: %d, state: %d, %s\n", __func__,
 		on, pin->name, pin->irq, pin->desc->depth, pin->level, trace->count, decon->state, (pin->level == pin->active_level) ? "abnormal" : "normal");
+
+	if (pin->name && !strcmp(pin->name, "pcd")) {
+		decon->ignore_vsync = (pin->level == pin->active_level) ? 1 : 0;
+		decon_info("%s: ignore_vsync: %d\n", __func__, decon->ignore_vsync);
+	}
 
 	if (on) {
 		decon_abd_pin_clear_pending_bit(pin->irq);
@@ -433,7 +499,7 @@ static void decon_abd_print_udr(struct seq_file *m, struct abd_trace *trace)
 
 		abd_printf(m, "MIF(%lu), INT(%lu), DISP(%lu)\n", log->mif, log->iint, log->disp);
 
-		bts = (struct decon_bts *)&log->bts;
+		bts = (struct decon_bts *)log->bts;
 		bts_info = &bts->bts_info;
 		abd_printf(m, "total(%u %u), max(%u %u), peak(%u)\n",
 				bts->prev_total_bw,
@@ -570,6 +636,7 @@ static int decon_abd_show(struct seq_file *m, void *unused)
 
 	if (abd->u_first.count) {
 		abd_printf(m, "==========_UDR_DEBUG_==========\n");
+		abd_printf(m, "dsim underrun irq occurs(%d)\n", dsim->total_underrun_cnt);
 		decon_abd_print_udr(m, &abd->u_first);
 		decon_abd_print_udr(m, &abd->u_lcdon);
 		decon_abd_print_udr(m, &abd->u_event);
@@ -653,17 +720,12 @@ static int decon_abd_pin_register_function(struct decon_device *decon, struct ab
 	int ret = 0, gpio = 0;
 	enum of_gpio_flags flags;
 	struct device_node *np = NULL;
+	struct platform_device *pdev = NULL;
 	struct device *dev = decon->dev;
 	unsigned int irqf_type = IRQF_TRIGGER_RISING;
 	struct abd_trace *trace = &pin->p_lcdon;
 	char *prefix_gpio = "gpio_";
 	char dts_name[10] = {0, };
-
-	np = dev->of_node;
-	if (!np) {
-		decon_warn("device node not exist\n");
-		goto exit;
-	}
 
 	if (strlen(keyword) + strlen(prefix_gpio) >= sizeof(dts_name)) {
 		decon_warn("%s: %s is too log(%zu)\n", __func__, keyword, strlen(keyword));
@@ -671,6 +733,10 @@ static int decon_abd_pin_register_function(struct decon_device *decon, struct ab
 	}
 
 	scnprintf(dts_name, sizeof(dts_name), "%s%s", prefix_gpio, keyword);
+
+	pdev = of_find_dsim_platform_device();
+
+	np = of_find_decon_board(pdev ? &pdev->dev : NULL);
 
 	if (!of_find_property(np, dts_name, NULL))
 		goto exit;
@@ -754,9 +820,9 @@ static int decon_abd_con_fb_blank(struct decon_device *decon)
 	v.info = info;
 	v.data = &blank;
 
-	decon_notifier_call_chain(FB_EARLY_EVENT_BLANK, &v);
-	info->fbops->fb_blank(blank, info);
-	decon_notifier_call_chain(FB_EVENT_BLANK, &v);
+	info->flags |= FBINFO_MISC_USEREVENT;
+	fb_blank(info, FB_BLANK_POWERDOWN);
+	info->flags &= ~FBINFO_MISC_USEREVENT;
 
 	unlock_fb_info(info);
 
@@ -830,18 +896,12 @@ static int decon_abd_con_pin_register_hander(struct decon_device *decon)
 	int ret = 0, gpio = 0;
 	enum of_gpio_flags flags;
 	struct device_node *np = NULL;
-	struct device *dev = decon->dev;
+	struct platform_device *pdev = NULL;
 	unsigned int irqf_type = IRQF_TRIGGER_RISING;
 	char *prefix_gpio = "gpio_";
 	char dts_name[10] = {0, };
 	char *keyword = "con";
 	struct abd_pin pin = {0, };
-
-	np = dev->of_node;
-	if (!np) {
-		decon_warn("device node not exist\n");
-		goto exit;
-	}
 
 	if (strlen(keyword) + strlen(prefix_gpio) >= sizeof(dts_name)) {
 		decon_warn("%s: %s is too log(%zu)\n", __func__, keyword, strlen(keyword));
@@ -849,6 +909,10 @@ static int decon_abd_con_pin_register_hander(struct decon_device *decon)
 	}
 
 	scnprintf(dts_name, sizeof(dts_name), "%s%s", prefix_gpio, keyword);
+
+	pdev = of_find_dsim_platform_device();
+
+	np = of_find_decon_board(pdev ? &pdev->dev : NULL);
 
 	if (!of_find_property(np, dts_name, NULL)) {
 		decon_info("%s: %s not exist\n", __func__, dts_name);
@@ -888,10 +952,23 @@ exit:
 
 int decon_abd_con_register(struct decon_device *decon)
 {
+	struct platform_device *pdev = NULL;
+	struct device *dev = NULL;
+	struct device_node *np = NULL;
+
 	if (!IS_ENABLED(CONFIG_SEC_FACTORY))
 		goto exit;
 
-	if (!of_find_property(decon->dev->of_node, "gpio_con", NULL))
+	if (!decon || !decon->dev)
+		decon_warn("%s: decon does not exist\n", __func__);
+	else
+		dev = decon->dev;
+
+	pdev = of_find_dsim_platform_device();
+
+	np = of_find_decon_board(pdev ? &pdev->dev : NULL);
+
+	if (!of_find_property(np, "gpio_con", NULL))
 		goto exit;
 
 	memcpy(&decon->abd.decon_fbops, decon->win[decon->dt.dft_win]->fbinfo->fbops, sizeof(struct fb_ops));
@@ -1024,40 +1101,21 @@ static void decon_abd_register(struct decon_device *decon)
 	decon_info("%s: -- entity was registered\n", __func__);
 }
 
-static int compare_with_name(struct device *dev, void *data)
-{
-	const char *keyword = data;
-
-	return dev_name(dev) ? !!strstr(dev_name(dev), keyword) : 0;
-}
-
-static struct device *find_platform_device_by_keyword(const char *keyword)
-{
-	return bus_find_device(&platform_bus_type, NULL, (void *)keyword, compare_with_name);
-}
-
 static struct decon_device *find_decon_device(void)
 {
-	struct device *dev = NULL;
 	struct platform_device *pdev = NULL;
 	struct decon_device *decon = NULL;
 
-	dev = find_platform_device_by_keyword("decon");
-	if (!dev) {
-		decon_info("bus_find_device fail for decon\n");
-		return ERR_CAST(dev);
-	}
-
-	pdev = to_platform_device(dev);
+	pdev = of_find_decon_platform_device();
 	if (!pdev) {
-		decon_info("to_platform_device fail for decon\n");
-		return ERR_CAST(pdev);
+		decon_info("%s: of_find_device_by_node fail\n", __func__);
+		return NULL;
 	}
 
 	decon = platform_get_drvdata(pdev);
-	if (!dev) {
-		decon_info("platform_get_drvdata fail for decon\n");
-		return ERR_CAST(decon);
+	if (!decon) {
+		decon_info("%s: platform_get_drvdata fail\n", __func__);
+		return NULL;
 	}
 
 	return decon;

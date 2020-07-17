@@ -71,3 +71,4 @@ config SEC_VTS_TEST
 
 source "drivers/samsung/debug/Kconfig"
 source "drivers/samsung/misc/Kconfig"
+source "drivers/samsung/pm/Kconfig"

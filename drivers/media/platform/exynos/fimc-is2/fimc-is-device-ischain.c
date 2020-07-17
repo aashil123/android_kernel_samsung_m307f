@@ -4270,9 +4270,15 @@ static int fimc_is_ischain_paf_stop(void *qdevice,
 	groupmgr = device->groupmgr;
 	group = &device->group_paf;
 
+	if (!test_bit(FIMC_IS_GROUP_INIT, &group->state))
+		goto p_err;
+
 	ret = fimc_is_group_stop(groupmgr, group);
 	if (ret) {
-		merr("fimc_is_group_stop is fail(%d)", device, ret);
+		if (ret == -EPERM)
+			ret = 0;
+		else
+			merr("fimc_is_group_stop is fail(%d)", device, ret);
 		goto p_err;
 	}
 
@@ -4560,9 +4566,15 @@ static int fimc_is_ischain_3aa_stop(void *qdevice,
 	groupmgr = device->groupmgr;
 	group = &device->group_3aa;
 
+	if (!test_bit(FIMC_IS_GROUP_INIT, &group->state))
+		goto p_err;
+
 	ret = fimc_is_group_stop(groupmgr, group);
 	if (ret) {
-		merr("fimc_is_group_stop is fail(%d)", device, ret);
+		if (ret == -EPERM)
+			ret = 0;
+		else
+			merr("fimc_is_group_stop is fail(%d)", device, ret);
 		goto p_err;
 	}
 
@@ -4849,9 +4861,15 @@ static int fimc_is_ischain_isp_stop(void *qdevice,
 	groupmgr = device->groupmgr;
 	group = &device->group_isp;
 
+	if (!test_bit(FIMC_IS_GROUP_INIT, &group->state))
+		goto p_err;
+
 	ret = fimc_is_group_stop(groupmgr, group);
 	if (ret) {
-		merr("fimc_is_group_stop is fail(%d)", device, ret);
+		if (ret == -EPERM)
+			ret = 0;
+		else
+			merr("fimc_is_group_stop is fail(%d)", device, ret);
 		goto p_err;
 	}
 
@@ -5141,9 +5159,15 @@ static int fimc_is_ischain_dis_stop(void *qdevice,
 	groupmgr = device->groupmgr;
 	group = &device->group_dis;
 
+	if (!test_bit(FIMC_IS_GROUP_INIT, &group->state))
+		goto p_err;
+
 	ret = fimc_is_group_stop(groupmgr, group);
 	if (ret) {
-		merr("fimc_is_group_stop is fail(%d)", device, ret);
+		if (ret == -EPERM)
+			ret = 0;
+		else
+			merr("fimc_is_group_stop is fail(%d)", device, ret);
 		goto p_err;
 	}
 
@@ -5433,9 +5457,15 @@ static int fimc_is_ischain_dcp_stop(void *qdevice,
 	groupmgr = device->groupmgr;
 	group = &device->group_dcp;
 
+	if (!test_bit(FIMC_IS_GROUP_INIT, &group->state))
+		goto p_err;
+
 	ret = fimc_is_group_stop(groupmgr, group);
 	if (ret) {
-		merr("fimc_is_group_stop is fail(%d)", device, ret);
+		if (ret == -EPERM)
+			ret = 0;
+		else
+			merr("fimc_is_group_stop is fail(%d)", device, ret);
 		goto p_err;
 	}
 
@@ -5726,9 +5756,15 @@ static int fimc_is_ischain_mcs_stop(void *qdevice,
 	groupmgr = device->groupmgr;
 	group = &device->group_mcs;
 
+	if (!test_bit(FIMC_IS_GROUP_INIT, &group->state))
+		goto p_err;
+
 	ret = fimc_is_group_stop(groupmgr, group);
 	if (ret) {
-		merr("fimc_is_group_stop is fail(%d)", device, ret);
+		if (ret == -EPERM)
+			ret = 0;
+		else
+			merr("fimc_is_group_stop is fail(%d)", device, ret);
 		goto p_err;
 	}
 
@@ -6011,9 +6047,15 @@ static int fimc_is_ischain_vra_stop(void *qdevice,
 	groupmgr = device->groupmgr;
 	group = &device->group_vra;
 
+	if (!test_bit(FIMC_IS_GROUP_INIT, &group->state))
+		goto p_err;
+
 	ret = fimc_is_group_stop(groupmgr, group);
 	if (ret) {
-		merr("fimc_is_group_stop is fail(%d)", device, ret);
+		if (ret == -EPERM)
+			ret = 0;
+		else
+			merr("fimc_is_group_stop is fail(%d)", device, ret);
 		goto p_err;
 	}
 
@@ -6796,6 +6838,7 @@ static int fimc_is_ischain_paf_shot(struct fimc_is_device_ischain *device,
 {
 	int ret = 0;
 	unsigned long flags;
+	struct fimc_is_resourcemgr *resourcemgr;
 	struct fimc_is_group *group, *child, *vra;
 	struct fimc_is_framemgr *framemgr;
 	struct fimc_is_frame *frame;
@@ -6809,8 +6852,9 @@ static int fimc_is_ischain_paf_shot(struct fimc_is_device_ischain *device,
 
 	mdbgs_ischain(4, "%s()\n", device, __func__);
 
-	frame = NULL;
+	resourcemgr = device->resourcemgr;
 	group = &device->group_paf;
+	frame = NULL;
 
 	framemgr = GET_HEAD_GROUP_FRAMEMGR(group);
 	if (!framemgr) {
@@ -6893,6 +6937,19 @@ static int fimc_is_ischain_paf_shot(struct fimc_is_device_ischain *device,
 		if (group->lens_ctl.aperture != 0) {
 			frame->shot->ctl.lens.aperture = group->lens_ctl.aperture;
 			group->lens_ctl.aperture = 0;
+		}
+
+		/*
+		 * Adjust the shot timeout value based on sensor exposure time control.
+		 * Exposure Time >= (FIMC_IS_SHOT_TIMEOUT - 1sec): Increase shot timeout value.
+		 */
+		if (frame->shot->ctl.aa.vendor_captureExposureTime >= ((FIMC_IS_SHOT_TIMEOUT * 1000) - 1000000)) {
+			resourcemgr->shot_timeout = (frame->shot->ctl.aa.vendor_captureExposureTime / 1000) + FIMC_IS_SHOT_TIMEOUT;
+			resourcemgr->shot_timeout_tick = KEEP_FRAME_TICK_DEFAULT;
+		} else if (resourcemgr->shot_timeout_tick > 0) {
+			resourcemgr->shot_timeout_tick--;
+		} else {
+			resourcemgr->shot_timeout = FIMC_IS_SHOT_TIMEOUT;
 		}
 	}
 
@@ -7018,6 +7075,7 @@ static int fimc_is_ischain_3aa_shot(struct fimc_is_device_ischain *device,
 {
 	int ret = 0;
 	unsigned long flags;
+	struct fimc_is_resourcemgr *resourcemgr;
 	struct fimc_is_group *group, *child, *vra;
 	struct fimc_is_framemgr *framemgr;
 	struct fimc_is_frame *frame;
@@ -7030,9 +7088,6 @@ static int fimc_is_ischain_3aa_shot(struct fimc_is_device_ischain *device,
 	uint32_t af_trigger_bk;
 	enum aa_afstate vendor_afstate_bk;
 	enum aa_capture_intent captureIntent_bk;
-	struct fimc_is_resourcemgr *resourcemgr;
-
-	resourcemgr = device->resourcemgr;
 #endif
 
 	mdbgs_ischain(4, "%s()\n", device, __func__);
@@ -7040,8 +7095,9 @@ static int fimc_is_ischain_3aa_shot(struct fimc_is_device_ischain *device,
 	FIMC_BUG(!device);
 	FIMC_BUG(!check_frame);
 
-	frame = NULL;
+	resourcemgr = device->resourcemgr;
 	group = &device->group_3aa;
+	frame = NULL;
 
 	framemgr = GET_HEAD_GROUP_FRAMEMGR(group);
 	if (!framemgr) {
@@ -7138,6 +7194,19 @@ static int fimc_is_ischain_3aa_shot(struct fimc_is_device_ischain *device,
 			minfo("frame count(%d), intent(%d), count(%d) captureExposureTime(%d)\n", device, frame->fcount,
 				frame->shot->ctl.aa.captureIntent, frame->shot->ctl.aa.vendor_captureCount,
 				frame->shot->ctl.aa.vendor_captureExposureTime);
+		}
+
+		/*
+		 * Adjust the shot timeout value based on sensor exposure time control.
+		 * Exposure Time >= (FIMC_IS_SHOT_TIMEOUT - 1sec): Increase shot timeout value.
+		 */
+		if (frame->shot->ctl.aa.vendor_captureExposureTime >= ((FIMC_IS_SHOT_TIMEOUT * 1000) - 1000000)) {
+			resourcemgr->shot_timeout = (frame->shot->ctl.aa.vendor_captureExposureTime / 1000) + FIMC_IS_SHOT_TIMEOUT;
+			resourcemgr->shot_timeout_tick = KEEP_FRAME_TICK_DEFAULT;
+		} else if (resourcemgr->shot_timeout_tick > 0) {
+			resourcemgr->shot_timeout_tick--;
+		} else {
+			resourcemgr->shot_timeout = FIMC_IS_SHOT_TIMEOUT;
 		}
 	}
 

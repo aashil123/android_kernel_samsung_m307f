@@ -12,6 +12,7 @@ obj-				:=
 
 obj-$(CONFIG_SEC_DEBUG)		+= debug/
 obj-$(CONFIG_SEC_MISC)		+= misc/
+obj-$(CONFIG_SEC_PM)		+= pm/
 
 # Samsung Reset Feature
 obj-$(CONFIG_SEC_REBOOT)	+= sec_reboot.o
