@@ -170,7 +170,20 @@ config SCSC_LOG_COLLECTION
 config SCSC_COMMON_HCF
 	bool "Enable Common HCF loader"
 	depends on SCSC_CORE
-	default n
+	default y
 	---help---
 	  Enable Common HCF loader
 
+config SCSC_WLBT_AUTORECOVERY_PERMANENT_DISABLE
+	bool "Permanently disable WLBT autorecovery, ignroring module parameter"
+	depends on SCSC_CORE
+	default n
+	---help---
+	  Override module parameter, and disable recovery
+
+config SCSC_MX450_GDB_SUPPORT
+	bool "Enable GDB Channels for MX450"
+	depends on SCSC_CORE
+	default n
+	---help---
+	  Enable GDB Channels for MX450

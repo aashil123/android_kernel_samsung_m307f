@@ -61,9 +61,9 @@ static DEFINE_MUTEX(bt_audio_mutex);
 static DEFINE_MUTEX(ant_start_mutex);
 #endif
 
-static int bt_recovery_in_progress;
+static u8 bt_recovery_level;
 #ifdef CONFIG_SCSC_ANT
-static int ant_recovery_in_progress;
+static u8 ant_recovery_level;
 #endif
 
 static int recovery_timeout = SLSI_BT_SERVICE_STOP_RECOVERY_TIMEOUT;
@@ -129,14 +129,22 @@ MODULE_PARM_DESC(disable_service,
 /*
  * Service event callbacks called from mx-core when things go wrong
  */
-static void bt_stop_on_failure(struct scsc_service_client *client)
+static u8 bt_failure_notification(struct scsc_service_client *client, struct mx_syserr_decode *err)
+{
+	UNUSED(client);
+	SCSC_TAG_INFO(BT_COMMON, "Error level %d\n", err->level);
+
+	return err->level;
+}
+
+static bool bt_stop_on_failure(struct scsc_service_client *client, struct mx_syserr_decode *err)
 {
 	UNUSED(client);
 
-	SCSC_TAG_ERR(BT_COMMON, "\n");
+	SCSC_TAG_ERR(BT_COMMON, "Error level %d\n", err->level);
 
 	reinit_completion(&bt_service.recovery_probe_complete);
-	bt_recovery_in_progress = 1;
+	bt_recovery_level = err->level;
 
 	atomic_inc(&bt_service.error_count);
 
@@ -152,12 +160,15 @@ static void bt_stop_on_failure(struct scsc_service_client *client)
 	}
 
 	mutex_unlock(&bt_audio_mutex);
+
+	return false;
 }
 
-static void bt_failure_reset(struct scsc_service_client *client, u16 scsc_panic_code)
+static void bt_failure_reset(struct scsc_service_client *client, u8 level, u16 scsc_syserr_code)
 {
 	UNUSED(client);
-	UNUSED(scsc_panic_code);
+	UNUSED(level);
+	UNUSED(scsc_syserr_code);
 
 	SCSC_TAG_ERR(BT_COMMON, "\n");
 
@@ -165,27 +176,36 @@ static void bt_failure_reset(struct scsc_service_client *client, u16 scsc_panic_
 }
 
 #ifdef CONFIG_SCSC_ANT
-static void ant_stop_on_failure(struct scsc_service_client *client)
+static u8 ant_failure_notification(struct scsc_service_client *client, struct mx_syserr_decode *err)
+{
+	UNUSED(client);
+	SCSC_TAG_INFO(BT_COMMON, "Error level %d\n", err->level);
+
+	return err->level;
+}
+
+static bool ant_stop_on_failure(struct scsc_service_client *client, struct mx_syserr_decode *err)
 {
 	UNUSED(client);
 
 	SCSC_TAG_ERR(BT_COMMON, "\n");
 
 	reinit_completion(&ant_service.recovery_probe_complete);
-	ant_recovery_in_progress = 1;
+	ant_recovery_level = err->level;
 
 	atomic_inc(&ant_service.error_count);
 
 	/* Let the ANT stack call poll() to be notified about the reset asap */
 	wake_up(&ant_service.read_wait);
-}
-#endif
 
-#ifdef CONFIG_SCSC_ANT
-static void ant_failure_reset(struct scsc_service_client *client, u16 scsc_panic_code)
+	return false;
+}
+
+static void ant_failure_reset(struct scsc_service_client *client, u8 level, u16 scsc_syserr_code)
 {
 	UNUSED(client);
-	UNUSED(scsc_panic_code);
+	UNUSED(level);
+	UNUSED(scsc_syserr_code);
 
 	SCSC_TAG_ERR(BT_COMMON, "\n");
 
@@ -204,14 +224,16 @@ static void scsc_bt_shm_irq_handler(int irqbit, void *data)
 }
 
 static struct scsc_service_client mx_bt_client = {
-	.stop_on_failure =      bt_stop_on_failure,
-	.failure_reset =        bt_failure_reset,
+	.failure_notification =    bt_failure_notification,
+	.stop_on_failure_v2 =      bt_stop_on_failure,
+	.failure_reset_v2 =        bt_failure_reset,
 };
 
 #ifdef CONFIG_SCSC_ANT
 static struct scsc_service_client mx_ant_client = {
-	.stop_on_failure =      ant_stop_on_failure,
-	.failure_reset =        ant_failure_reset,
+	.failure_notification =    ant_failure_notification,
+	.stop_on_failure_v2 =      ant_stop_on_failure,
+	.failure_reset_v2 =        ant_failure_reset,
 };
 #endif
 
@@ -235,15 +257,19 @@ static int slsi_sm_bt_service_cleanup_stop_service(void)
 	/* Stop service first, then it's safe to release shared memory
 	   resources */
 	ret = scsc_mx_service_stop(bt_service.service);
-	if (ret) {
+
+	if (ret < 0 && ret != -EPERM) {
 		SCSC_TAG_ERR(BT_COMMON,
 			     "scsc_mx_service_stop failed err: %d\n", ret);
-		if (0 == atomic_read(&bt_service.error_count)) {
+
+		/* Only trigger recovery if the service_stop did not fail because recovery is already in progress */
+		if (atomic_read(&bt_service.error_count) == 0 && ret != -EILSEQ) {
 			scsc_mx_service_service_failed(bt_service.service, "BT service stop failed");
 			SCSC_TAG_DEBUG(BT_COMMON,
 				       "force service fail complete\n");
+
+			return ret;
 		}
-		return -EIO;
 	}
 
 	return 0;
@@ -305,20 +331,26 @@ struct scsc_log_collector_client bt_collect_hcf_client = {
 };
 #endif
 
-static int slsi_sm_bt_service_cleanup(bool allow_service_stop)
+static int slsi_sm_bt_service_cleanup(bool force_cleanup)
 {
-	SCSC_TAG_DEBUG(BT_COMMON, "enter (service=%p)\n", bt_service.service);
+	int ret = 0;
+
+	SCSC_TAG_DEBUG(BT_COMMON, "enter\n");
 
 	if (NULL != bt_service.service) {
-		SCSC_TAG_DEBUG(BT_COMMON, "stopping debugging thread\n");
+		SCSC_TAG_DEBUG(BT_COMMON, "stopping debugging thread (service=%p)\n", bt_service.service);
 
 		/* If slsi_sm_bt_service_cleanup_stop_service fails, then let
 		   recovery do the rest of the deinit later. */
-		if (!bt_recovery_in_progress && allow_service_stop)
-			if (slsi_sm_bt_service_cleanup_stop_service() < 0) {
-				SCSC_TAG_DEBUG(BT_COMMON, "slsi_sm_bt_service_cleanup_stop_service failed. Recovery has been triggered\n");
+		if (bt_service.service_started) {
+			ret = slsi_sm_bt_service_cleanup_stop_service();
+			bt_service.service_started = false;
+
+			if (ret < 0 && !force_cleanup) {
+				SCSC_TAG_DEBUG(BT_COMMON, "service stop failed. Recovery has been triggered\n");
 				goto done_error;
 			}
+		}
 
 		/* Service is stopped - ensure polling function is existed */
 		SCSC_TAG_DEBUG(BT_COMMON, "wake reader/poller thread\n");
@@ -378,8 +410,11 @@ static int slsi_sm_bt_service_cleanup(bool allow_service_stop)
 		}
 
 		SCSC_TAG_DEBUG(BT_COMMON, "closing service...\n");
-		if (0 != scsc_mx_service_close(bt_service.service)) {
-			int retry_counter, r;
+
+		ret = scsc_mx_service_close(bt_service.service);
+
+		if (ret < 0 && ret != -EPERM) {
+			int retry_counter;
 
 			SCSC_TAG_DEBUG(BT_COMMON,
 				"scsc_mx_service_close failed\n");
@@ -390,12 +425,12 @@ static int slsi_sm_bt_service_cleanup(bool allow_service_stop)
 			 * until close service is successful. Will try up to
 			 * 30 seconds.
 			 */
-			for (retry_counter = 0;
-			     SLSI_BT_SERVICE_CLOSE_RETRY > retry_counter;
-			     retry_counter++) {
+			for (retry_counter = 0; retry_counter < SLSI_BT_SERVICE_CLOSE_RETRY; retry_counter++) {
 				msleep(500);
-				r = scsc_mx_service_close(bt_service.service);
-				if (r == 0) {
+
+				ret = scsc_mx_service_close(bt_service.service);
+
+				if (ret == 0) {
 					SCSC_TAG_DEBUG(BT_COMMON,
 						"scsc_mx_service_close closed after %d attempts\n",
 						retry_counter + 1);
@@ -441,14 +476,13 @@ static int slsi_sm_ant_service_cleanup_stop_service(void)
 	 * resources
 	 */
 	ret = scsc_mx_service_stop(ant_service.service);
-	if (ret) {
+	if (ret < 0 && ret != -EPERM) {
 		SCSC_TAG_ERR(BT_COMMON,
 			     "scsc_mx_service_stop failed err: %d\n", ret);
-		if (atomic_read(&ant_service.error_count) == 0) {
+		if (atomic_read(&ant_service.error_count) == 0 && ret != -EILSEQ) {
 			scsc_mx_service_service_failed(ant_service.service, "ANT service stop failed");
-			SCSC_TAG_DEBUG(BT_COMMON,
-				       "force service fail complete\n");
-			return -EIO;
+			SCSC_TAG_DEBUG(BT_COMMON, "force service fail complete\n");
+			return ret;
 		}
 	}
 
@@ -457,9 +491,11 @@ static int slsi_sm_ant_service_cleanup_stop_service(void)
 #endif
 
 #ifdef CONFIG_SCSC_ANT
-static int slsi_sm_ant_service_cleanup(bool allow_service_stop)
+static int slsi_sm_ant_service_cleanup(bool force_cleanup)
 {
-	SCSC_TAG_DEBUG(BT_COMMON, "enter (service=%p)\n", ant_service.service);
+	int ret = 0;
+
+	SCSC_TAG_DEBUG(BT_COMMON, "enter\n");
 
 	if (ant_service.service != NULL) {
 		SCSC_TAG_DEBUG(BT_COMMON, "stopping debugging thread\n");
@@ -467,10 +503,12 @@ static int slsi_sm_ant_service_cleanup(bool allow_service_stop)
 		/* If slsi_sm_ant_service_cleanup_stop_service fails, then let
 		 * recovery do the rest of the deinit later.
 		 **/
-		if (!ant_recovery_in_progress && allow_service_stop)
-			if (slsi_sm_ant_service_cleanup_stop_service() < 0) {
-				SCSC_TAG_DEBUG(BT_COMMON,
-					"slsi_sm_ant_service_cleanup_stop_service failed. Recovery has been triggered\n");
+		if (ant_service.service_started)
+			ret = slsi_sm_ant_service_cleanup_stop_service();
+			ant_service.service_started = false;
+
+			if (ret < 0 && !force_cleanup) {
+				SCSC_TAG_DEBUG(BT_COMMON, "service stop failed. Recovery has been triggered\n");
 				goto done_error;
 			}
 
@@ -503,8 +541,11 @@ static int slsi_sm_ant_service_cleanup(bool allow_service_stop)
 		}
 
 		SCSC_TAG_DEBUG(BT_COMMON, "closing ant service...\n");
-		if (scsc_mx_service_close(ant_service.service) != 0) {
-			int retry_counter, r;
+
+		ret = scsc_mx_service_close(ant_service.service);
+
+		if (ret < 0 && ret != -EPERM) {
+			int retry_counter;
 
 			SCSC_TAG_DEBUG(BT_COMMON,
 				"scsc_mx_service_close failed\n");
@@ -519,8 +560,8 @@ static int slsi_sm_ant_service_cleanup(bool allow_service_stop)
 			     retry_counter < SLSI_BT_SERVICE_CLOSE_RETRY;
 			     retry_counter++) {
 				msleep(500);
-				r = scsc_mx_service_close(ant_service.service);
-				if (r == 0) {
+				ret = scsc_mx_service_close(ant_service.service);
+				if (ret == 0) {
 					SCSC_TAG_DEBUG(BT_COMMON,
 						"scsc_mx_service_close closed after %d attempts\n",
 						retry_counter + 1);
@@ -647,7 +688,7 @@ static int setup_bhcs(struct scsc_service *service,
 	}
 
 #ifdef SCSC_BT_ADDR
-	/* Request the CSA Bluetooth address file */
+	/* Request the Bluetooth address file */
 	SCSC_TAG_DEBUG(BT_COMMON,
 		"loading Bluetooth address configuration file: "
 		SCSC_BT_ADDR "\n");
@@ -728,7 +769,7 @@ int slsi_sm_bt_service_start(void)
 	}
 
 	/* Has probe been called */
-	if (bt_recovery_in_progress) {
+	if (bt_recovery_level != 0) {
 		SCSC_TAG_WARNING(BT_COMMON, "recovery in progress\n");
 		mutex_unlock(&bt_start_mutex);
 		return -EFAULT;
@@ -744,8 +785,15 @@ int slsi_sm_bt_service_start(void)
 	/* Is this the first service to enter */
 	if (atomic_inc_return(&bt_service.service_users) > 1) {
 		SCSC_TAG_WARNING(BT_COMMON, "service already opened\n");
+
+		if (!bt_service.service_started) {
+			SCSC_TAG_DEBUG(BT_COMMON, "service not started, returning error\n");
+			err = -EFAULT;
+			atomic_dec(&bt_service.service_users);
+		}
+
 		mutex_unlock(&bt_start_mutex);
-		return 0;
+		return err;
 	}
 
 	/* Open service - will download FW - will set MBOX0 with Starting
@@ -761,8 +809,10 @@ int slsi_sm_bt_service_start(void)
 						  &err);
 	if (!bt_service.service) {
 		SCSC_TAG_WARNING(BT_COMMON, "service open failed %d\n", err);
-		err = -EINVAL;
-		goto exit;
+		atomic_dec(&bt_service.service_users);
+		wake_unlock(&bt_service.service_wake_lock);
+		mutex_unlock(&bt_start_mutex);
+		return -EINVAL;
 	}
 
 	/* Shorter completion timeout if autorecovery is disabled, as it will
@@ -770,6 +820,8 @@ int slsi_sm_bt_service_start(void)
 	 */
 	if (mxman_recovery_disabled())
 		recovery_timeout = SLSI_BT_SERVICE_STOP_RECOVERY_DISABLED_TIMEOUT;
+	else
+		recovery_timeout = SLSI_BT_SERVICE_STOP_RECOVERY_TIMEOUT;
 
 	/* Get shared memory region for the configuration structure from
 	 * the MIF
@@ -919,11 +971,12 @@ int slsi_sm_bt_service_start(void)
 	/* Start service last - after setting up shared memory resources */
 	SCSC_TAG_DEBUG(BT_COMMON, "starting Bluetooth service\n");
 	err = scsc_mx_service_start(bt_service.service, bt_service.bhcs_ref);
-	if (err) {
+	if (err < 0) {
 		SCSC_TAG_ERR(BT_COMMON, "scsc_mx_service_start err %d\n", err);
 		err = -EINVAL;
 	} else {
 		SCSC_TAG_DEBUG(BT_COMMON, "Bluetooth service running\n");
+		bt_service.service_started = true;
 		slsi_kic_system_event(
 			slsi_kic_system_event_category_initialisation,
 			slsi_kic_system_events_bt_on, 0);
@@ -942,8 +995,8 @@ int slsi_sm_bt_service_start(void)
 		SCSC_TAG_DEBUG(BT_COMMON, "features enabled: M4_INTERRUPTS\n");
 
 exit:
-	if (err) {
-		if (slsi_sm_bt_service_cleanup(false) == 0)
+	if (err < 0) {
+		if (slsi_sm_bt_service_cleanup(true) == 0)
 			atomic_dec(&bt_service.service_users);
 	}
 
@@ -982,8 +1035,15 @@ int slsi_sm_ant_service_start(void)
 	/* Is this the first service to enter */
 	if (atomic_inc_return(&ant_service.service_users) > 1) {
 		SCSC_TAG_WARNING(BT_COMMON, "service already opened\n");
+
+		if (!ant_service.service_started) {
+			SCSC_TAG_DEBUG(BT_COMMON, "service not started, returning error\n");
+			err = -EFAULT;
+			atomic_dec(&bt_service.service_users);
+		}
+
 		mutex_unlock(&ant_start_mutex);
-		return 0;
+		return err;
 	}
 
 	/* Open service - will download FW - will set MBOX0 with Starting
@@ -1000,8 +1060,12 @@ int slsi_sm_ant_service_start(void)
 						  &err);
 	if (!ant_service.service) {
 		SCSC_TAG_WARNING(BT_COMMON, "ant service open failed %d\n", err);
-		err = -EINVAL;
-		goto exit;
+		if (err < 0) {
+			atomic_dec(&ant_service.service_users);
+			wake_unlock(&ant_service.service_wake_lock);
+			mutex_unlock(&ant_start_mutex);
+			return -EINVAL;
+		}
 	}
 
 	/* Shorter completion timeout if autorecovery is disabled, as it will
@@ -1009,6 +1073,8 @@ int slsi_sm_ant_service_start(void)
 	 */
 	if (mxman_recovery_disabled())
 		recovery_timeout = SLSI_BT_SERVICE_STOP_RECOVERY_DISABLED_TIMEOUT;
+	else
+		recovery_timeout = SLSI_BT_SERVICE_STOP_RECOVERY_TIMEOUT;
 
 
 	/* Get shared memory region for the configuration structure from
@@ -1086,19 +1152,20 @@ int slsi_sm_ant_service_start(void)
 	/* Start service last - after setting up shared memory resources */
 	SCSC_TAG_DEBUG(BT_COMMON, "starting ANT service\n");
 	err = scsc_mx_service_start(ant_service.service, ant_service.bhcs_ref);
-	if (err) {
+	if (err < 0) {
 		SCSC_TAG_ERR(BT_COMMON, "scsc_mx_service_start err %d\n", err);
 		err = -EINVAL;
 	} else {
 		SCSC_TAG_DEBUG(BT_COMMON, "Ant service running\n");
+		ant_service.service_started = true;
 		slsi_kic_system_event(
 			slsi_kic_system_event_category_initialisation,
 			slsi_kic_system_events_ant_on, 0);
 	}
 
 exit:
-	if (err) {
-		if (slsi_sm_ant_service_cleanup(false) == 0)
+	if (err < 0) {
+		if (slsi_sm_ant_service_cleanup(true) == 0)
 			atomic_dec(&ant_service.service_users);
 	}
 
@@ -1109,14 +1176,14 @@ exit:
 #endif
 
 /* Stop the BT service */
-static int slsi_sm_bt_service_stop(void)
+static int slsi_sm_bt_service_stop(bool force_cleanup)
 {
 	SCSC_TAG_INFO(BT_COMMON, "bt service users %u\n", atomic_read(&bt_service.service_users));
 
 	if (1 < atomic_read(&bt_service.service_users)) {
 		atomic_dec(&bt_service.service_users);
 	} else if (1 == atomic_read(&bt_service.service_users)) {
-		if (slsi_sm_bt_service_cleanup(true) == 0)
+		if (slsi_sm_bt_service_cleanup(force_cleanup) == 0)
 			atomic_dec(&bt_service.service_users);
 		else
 			return -EIO;
@@ -1127,14 +1194,14 @@ static int slsi_sm_bt_service_stop(void)
 
 #ifdef CONFIG_SCSC_ANT
 /* Stop the ANT service */
-static int slsi_sm_ant_service_stop(void)
+static int slsi_sm_ant_service_stop(bool force_cleanup)
 {
 	SCSC_TAG_INFO(BT_COMMON, "ant service users %u\n", atomic_read(&ant_service.service_users));
 
 	if (atomic_read(&ant_service.service_users) > 1) {
 		atomic_dec(&ant_service.service_users);
 	} else if (atomic_read(&ant_service.service_users) == 1) {
-		if (slsi_sm_ant_service_cleanup(true) == 0)
+		if (slsi_sm_ant_service_cleanup(force_cleanup) == 0)
 			atomic_dec(&ant_service.service_users);
 		else
 			return -EIO;
@@ -1163,10 +1230,12 @@ static int scsc_bt_h4_open(struct inode *inode, struct file *file)
 
 static int scsc_bt_h4_release(struct inode *inode, struct file *file)
 {
+	SCSC_TAG_INFO(BT_COMMON, "\n");
+
 	mutex_lock(&bt_start_mutex);
 	wake_lock(&bt_service.service_wake_lock);
-	if (!bt_recovery_in_progress) {
-		if (slsi_sm_bt_service_stop() == -EIO)
+	if (bt_recovery_level != MX_SYSERR_LEVEL_7) {
+		if (slsi_sm_bt_service_stop(false) == -EIO)
 			goto recovery;
 
 		/* Clear all control structures */
@@ -1175,18 +1244,19 @@ static int scsc_bt_h4_release(struct inode *inode, struct file *file)
 		bt_service.read_index = 0;
 		bt_service.h4_write_offset = 0;
 
-		bt_service.h4_users = false;
-
 		/* The recovery flag can be set in case of crossing release and
 		 * recovery signaling. It's safe to check the flag here since
 		 * the bt_start_mutex guarantees that the remove/probe callbacks
 		 * will be called after the mutex is released. Jump to the
 		 * normal recovery path.
 		 */
-		if (bt_recovery_in_progress)
+		if (bt_recovery_level == MX_SYSERR_LEVEL_7)
 			goto recovery;
+		else
+			bt_recovery_level = 0;
 
 		wake_unlock(&bt_service.service_wake_lock);
+		bt_service.h4_users = false;
 		mutex_unlock(&bt_start_mutex);
 	} else {
 		int ret;
@@ -1199,6 +1269,8 @@ recovery:
 		       msecs_to_jiffies(recovery_timeout));
 		if (ret == 0)
 			SCSC_TAG_INFO(BT_COMMON, "recovery_probe_complete timeout\n");
+
+		bt_service.h4_users = false;
 	}
 
 	return 0;
@@ -1207,10 +1279,12 @@ recovery:
 #ifdef CONFIG_SCSC_ANT
 static int scsc_ant_release(struct inode *inode, struct file *file)
 {
+	SCSC_TAG_INFO(BT_COMMON, "\n");
+
 	mutex_lock(&ant_start_mutex);
 	wake_lock(&ant_service.service_wake_lock);
-	if (!ant_recovery_in_progress) {
-		if (slsi_sm_ant_service_stop() == -EIO)
+	if (ant_recovery_level != MX_SYSERR_LEVEL_7) {
+		if (slsi_sm_ant_service_stop(false) == -EIO)
 			goto recovery;
 
 		/* Clear all control structures */
@@ -1227,10 +1301,13 @@ static int scsc_ant_release(struct inode *inode, struct file *file)
 		 * will be called after the mutex is released. Jump to the
 		 * normal recovery path.
 		 */
-		if (ant_recovery_in_progress)
+		if (ant_recovery_level == MX_SYSERR_LEVEL_7)
 			goto recovery;
+		else
+			ant_recovery_level = 0;
 
 		wake_unlock(&ant_service.service_wake_lock);
+		ant_service.ant_users = false;
 		mutex_unlock(&ant_start_mutex);
 	} else {
 		int ret;
@@ -1243,6 +1320,8 @@ recovery:
 		       msecs_to_jiffies(recovery_timeout));
 		if (ret == 0)
 			SCSC_TAG_INFO(BT_COMMON, "recovery_probe_complete timeout\n");
+
+		ant_service.ant_users = false;
 	}
 
 	return 0;
@@ -1256,12 +1335,12 @@ static int scsc_ant_open(struct inode *inode, struct file *file)
 
 	SCSC_TAG_INFO(BT_COMMON, "(ant_users=%u)\n", ant_service.ant_users ? 1 : 0);
 
-	if (ant_recovery_in_progress) {
+	if (ant_recovery_level != 0) {
 		SCSC_TAG_WARNING(BT_COMMON, "recovery in progress\n");
 		wait_event_interruptible_timeout(ant_recovery_complete_queue,
-						 ant_recovery_in_progress == 0,
+						 ant_recovery_level == 0,
 						 SCSC_ANT_MAX_TIMEOUT);
-		if (ant_recovery_in_progress) {
+		if (ant_recovery_level != 0) {
 			SCSC_TAG_WARNING(BT_COMMON, "recovery timeout, aborting\n");
 			return -EFAULT;
 		}
@@ -1426,7 +1505,7 @@ void slsi_bt_service_probe(struct scsc_mx_module_client *module_client,
 		      "BT service probe (%s %p)\n", module_client->name, mx);
 
 	mutex_lock(&bt_start_mutex);
-	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && !bt_recovery_in_progress) {
+	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && bt_recovery_level == 0) {
 		SCSC_TAG_INFO(BT_COMMON,
 			      "BT service probe recovery, but no recovery in progress\n");
 		goto done;
@@ -1437,9 +1516,9 @@ void slsi_bt_service_probe(struct scsc_mx_module_client *module_client,
 
 	get_device(bt_service.dev);
 
-	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && bt_recovery_in_progress) {
+	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && bt_recovery_level != 0) {
 		complete_all(&bt_service.recovery_probe_complete);
-		bt_recovery_in_progress = 0;
+		bt_recovery_level = 0;
 	}
 
 	slsi_bt_notify_probe(bt_service.dev,
@@ -1460,27 +1539,31 @@ static void slsi_bt_service_remove(struct scsc_mx_module_client *module_client,
 		      "BT service remove (%s %p)\n", module_client->name, mx);
 
 	mutex_lock(&bt_start_mutex);
-	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && !bt_recovery_in_progress) {
+	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && bt_recovery_level == 0) {
 		SCSC_TAG_INFO(BT_COMMON,
 			      "BT service remove recovery, but no recovery in progress\n");
 		goto done;
 	}
 
-	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && bt_recovery_in_progress) {
+	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && bt_recovery_level != 0) {
+		bool h4_users = bt_service.h4_users;
+
 		mutex_unlock(&bt_start_mutex);
 
 		/* Wait forever for recovery_release_complete, as it will
 		 * arrive even if autorecovery is disabled.
 		 */
 		SCSC_TAG_INFO(BT_COMMON, "wait for recovery_release_complete\n");
-		wait_for_completion(&bt_service.recovery_release_complete);
+
+		/* only wait for recovery_release_complete if service has a user */
+		if (h4_users)
+			wait_for_completion(&bt_service.recovery_release_complete);
+
 		reinit_completion(&bt_service.recovery_release_complete);
 
 		mutex_lock(&bt_start_mutex);
-		if (slsi_sm_bt_service_stop() == -EIO)
+		if (slsi_sm_bt_service_stop(true) == -EIO)
 			SCSC_TAG_INFO(BT_COMMON, "Service stop or close failed during recovery.\n");
-
-		bt_service.h4_users = false;
 
 		/* Clear all control structures */
 		bt_service.read_offset = 0;
@@ -1518,7 +1601,7 @@ void slsi_ant_service_probe(struct scsc_mx_module_client *module_client,
 		      "ANT service probe (%s %p)\n", module_client->name, mx);
 
 	mutex_lock(&ant_start_mutex);
-	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && !ant_recovery_in_progress) {
+	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && ant_recovery_level == 0) {
 		SCSC_TAG_INFO(BT_COMMON,
 			      "ANT service probe recovery, but no recovery in progress\n");
 		goto done;
@@ -1529,9 +1612,9 @@ void slsi_ant_service_probe(struct scsc_mx_module_client *module_client,
 
 	get_device(ant_service.dev);
 
-	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && ant_recovery_in_progress) {
+	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && ant_recovery_level != 0) {
 		complete_all(&ant_service.recovery_probe_complete);
-		ant_recovery_in_progress = 0;
+		ant_recovery_level = 0;
 	}
 
 done:
@@ -1550,28 +1633,30 @@ static void slsi_ant_service_remove(struct scsc_mx_module_client *module_client,
 		      "ANT service remove (%s %p)\n", module_client->name, mx);
 
 	mutex_lock(&ant_start_mutex);
-	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && !ant_recovery_in_progress) {
+	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && ant_recovery_level == 0) {
 		SCSC_TAG_INFO(BT_COMMON,
 			      "ANT service remove recovery, but no recovery in progress\n");
 		goto done;
 	}
 
-	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && ant_recovery_in_progress) {
+	if (reason == SCSC_MODULE_CLIENT_REASON_RECOVERY && ant_recovery_level != 0) {
 		int ret;
+		bool ant_users = ant_service.ant_users;
 
 		mutex_unlock(&ant_start_mutex);
 
 		/* Wait full duration for recovery_release_complete, as it will
 		 * arrive even if autorecovery is disabled.
 		 */
-		ret = wait_for_completion_timeout(&ant_service.recovery_release_complete,
-		       msecs_to_jiffies(SLSI_BT_SERVICE_STOP_RECOVERY_TIMEOUT));
+		if (ant_users)
+			ret = wait_for_completion_timeout(&ant_service.recovery_release_complete,
+			       msecs_to_jiffies(SLSI_BT_SERVICE_STOP_RECOVERY_TIMEOUT));
 		reinit_completion(&ant_service.recovery_release_complete);
 		if (ret == 0)
 			SCSC_TAG_INFO(BT_COMMON, "recovery_release_complete timeout\n");
 
 		mutex_lock(&ant_start_mutex);
-		if (slsi_sm_ant_service_stop() == -EIO)
+		if (slsi_sm_ant_service_stop(true) == -EIO)
 			SCSC_TAG_INFO(BT_COMMON, "Service stop or close failed during recovery.\n");
 
 		ant_service.ant_users = false;
@@ -1930,6 +2015,10 @@ static int __init scsc_bt_module_init(void)
 
 	SCSC_TAG_INFO(BT_COMMON, "%s %s (C) %s\n",
 		      SCSC_MODDESC, SCSC_MODVERSION, SCSC_MODAUTH);
+	bt_recovery_level = 0;
+#ifdef CONFIG_SCSC_ANT
+	ant_recovery_level = 0;
+#endif
 
 	memset(&bt_service, 0, sizeof(bt_service));
 #ifdef CONFIG_SCSC_ANT

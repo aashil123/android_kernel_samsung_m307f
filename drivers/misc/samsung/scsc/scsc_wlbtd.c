@@ -13,6 +13,7 @@
 
 /* completion to indicate when EVENT_* is done */
 static DECLARE_COMPLETION(event_done);
+static DECLARE_COMPLETION(fw_sable_done);
 static DECLARE_COMPLETION(fw_panic_done);
 static DECLARE_COMPLETION(write_file_done);
 static DEFINE_MUTEX(write_file_lock);
@@ -100,15 +101,6 @@ static int msg_from_wlbtd_sable_cb(struct sk_buff *skb, struct genl_info *info)
 		SCSC_TAG_ERR(WLBTD, "%s\n", response_code_to_str(status));
 	}
 
-	if (disable_recovery_handling == MEMDUMP_FILE_FOR_RECOVERY) {
-		if (status == MEMDUMP_FILE_KERNEL_PANIC) {
-			/* Auto recovery off + moredump + kernel panic */
-			SCSC_TAG_INFO(WLBTD, "Deliberately panic the kernel due to WLBT firmware failure!\n");
-			SCSC_TAG_INFO(WLBTD, "calling BUG_ON(1)\n");
-			BUG_ON(1);
-		}
-	}
-
 	/* completion cases :
 	 * 1) FW_PANIC_TAR_GENERATED
 	 *    for trigger scsc_log_fw_panic only one response from wlbtd when
@@ -118,6 +110,7 @@ static int msg_from_wlbtd_sable_cb(struct sk_buff *skb, struct genl_info *info)
 	 *	a) OTHER_SBL_GENERATED
 	 *	   Once .sbl is written
 	 *    ---> complete event_done
+	 *    ---> complete fw_sable_done for extra waiter
 	 *	b) OTHER_TAR_GENERATED
 	 *	   2nd time when sable tar is done
 	 *	   IGNORE this response and Don't complete
@@ -127,6 +120,7 @@ static int msg_from_wlbtd_sable_cb(struct sk_buff *skb, struct genl_info *info)
 	 *    we ignore requests other than "fw_panic" in wlbtd and
 	 *    send a msg "ignoring" back to kernel.
 	 *    ---> complete event_done
+	 *    ---> complete fw_sable_done for extra waiter
 	 * 4) FW_PANIC_ERR_* and OTHER_ERR_*
 	 *    when something failed, file not found, mmap failed, etc.
 	 *    ---> complete the completion with waiter(s) based on if it was
@@ -141,6 +135,10 @@ static int msg_from_wlbtd_sable_cb(struct sk_buff *skb, struct genl_info *info)
 		if (!completion_done(&fw_panic_done)) {
 			SCSC_TAG_INFO(WLBTD, "completing fw_panic_done\n");
 			complete(&fw_panic_done);
+		}
+		if (!completion_done(&fw_sable_done)) {
+			SCSC_TAG_INFO(WLBTD, "completing fw_sable_done\n");
+			complete(&fw_sable_done);
 		}
 		if (!completion_done(&event_done)) {
 			SCSC_TAG_INFO(WLBTD, "completing event_done\n");
@@ -168,6 +166,10 @@ static int msg_from_wlbtd_sable_cb(struct sk_buff *skb, struct genl_info *info)
 	case SCSC_WLBTD_OTHER_ERR_MMAP:
 	case SCSC_WLBTD_OTHER_ERR_SABLE_FILE:
 	case SCSC_WLBTD_OTHER_IGNORE_TRIGGER:
+		if (!completion_done(&fw_sable_done)) {
+			SCSC_TAG_INFO(WLBTD, "completing fw_sable_done\n");
+			complete(&fw_sable_done);
+		}
 		if (!completion_done(&event_done)) {
 			SCSC_TAG_INFO(WLBTD, "completing event_done\n");
 			complete(&event_done);
@@ -578,6 +580,22 @@ error:
 }
 EXPORT_SYMBOL(call_wlbtd_sable);
 
+void scsc_wlbtd_wait_for_sable_logging(void)
+{
+	unsigned long completion_jiffies = 0;
+	unsigned long max_timeout_jiffies = msecs_to_jiffies(MAX_TIMEOUT);
+	/* Just waits for the log collection not tarring */
+	completion_jiffies = wait_for_completion_timeout(&fw_sable_done,
+						max_timeout_jiffies);
+	if (!completion_jiffies)
+		SCSC_TAG_ERR(WLBTD, "wait for sable logging timed out !\n");
+
+	/* reinit so completion can be re-used */
+	reinit_completion(&fw_sable_done);
+}
+EXPORT_SYMBOL(scsc_wlbtd_wait_for_sable_logging);
+
+
 int call_wlbtd(const char *script_path)
 {
 	struct sk_buff *skb;
@@ -681,6 +699,7 @@ int scsc_wlbtd_init(void)
 
 	wake_lock_init(&wlbtd_wakelock, WAKE_LOCK_SUSPEND, "wlbtd_wl");
 	init_completion(&event_done);
+	init_completion(&fw_sable_done);
 	init_completion(&fw_panic_done);
 	init_completion(&write_file_done);
 
